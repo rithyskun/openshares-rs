@@ -16,7 +16,6 @@ use axum::{Json, Router};
 use serde_json::json;
 
 use openshares_core::crypto::signing::signing_key_for;
-use openshares_core::rbac::permissions_of;
 
 use crate::error::Result;
 use crate::extract::{MaybeUser, SESSION_COOKIE, cookie_value};
@@ -30,7 +29,7 @@ pub fn router() -> Router<AppState> {
 /// `Response.json({id, name, email, telegram_id, permissions, signingKey})`
 /// — `signingKey` is `null` when `REQUEST_SIGNING_SECRET` is unset.
 async fn me(
-    State(state): State<AppState>,
+    State(_state): State<AppState>,
     MaybeUser(user): MaybeUser,
     headers: HeaderMap,
 ) -> Result<Response> {
@@ -40,10 +39,7 @@ async fn me(
 
     // `[...permissions]` — sorted so the wire shape is deterministic
     // (the TS Set's order is unspecified anyway).
-    let mut permissions: Vec<String> = permissions_of(&state.db, user.id)
-        .await?
-        .into_iter()
-        .collect();
+    let mut permissions: Vec<String> = user.permissions.iter().cloned().collect();
     permissions.sort();
 
     Ok(Json(json!({

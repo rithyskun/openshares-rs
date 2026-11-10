@@ -36,7 +36,6 @@ use openshares_core::crypto::security::{Limiter, rate_limited};
 use openshares_core::db::repos::media::{MediaListQuery, MediaScope};
 use openshares_core::db::repos::{albums, media};
 use openshares_core::db::{PUBLIC_LINK_TTL, now};
-use openshares_core::rbac::can;
 use openshares_core::settings::stored_bot_username;
 use openshares_core::telegram::{TgMessageOut, file_form};
 use openshares_core::util::{new_token, random_slug};
@@ -153,12 +152,13 @@ async fn revoke_if_expired(
 /// `requirePerm`), all albums newest-first with item counts and covers —
 /// the page lists **all** albums regardless of owner (shared vault).
 async fn list_albums(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
-    let uid = user.0.id;
-    if !can(&state.db, uid, "media:view", None).await? {
+    if !user.0.can("media:view", None) {
         return Err(ApiError::forbidden("Not allowed."));
     }
-    let rows = albums::list_all_with_stats(&state.db).await?;
-    let bot = bot_username(&state).await;
+    // The album rows and the bot-username setting are independent remote
+    // round trips — overlap them.
+    let (rows, bot) = tokio::join!(albums::list_all_with_stats(&state.db), bot_username(&state),);
+    let rows = rows?;
 
     let mut out = Vec::with_capacity(rows.len());
     for mut a in rows {
@@ -191,7 +191,7 @@ async fn create_album(
     req: Request,
 ) -> Result<Response> {
     let uid = user.0.id;
-    if !can(&state.db, uid, "album:create", None).await? {
+    if !user.0.can("album:create", None) {
         return Err(ApiError::forbidden("Forbidden."));
     }
     let body: Map<String, Value> = json_body(req, Some(&user.0.sid)).await?;
@@ -246,13 +246,13 @@ async fn get_album(
     user: AuthUser,
 ) -> Result<Response> {
     let uid = user.0.id;
-    if !can(&state.db, uid, "media:view", None).await? {
+    if !user.0.can("media:view", None) {
         return Err(ApiError::forbidden("Not allowed."));
     }
     let mut album = albums::get_by_slug(&state.db, &slug)
         .await?
         .ok_or_else(|| ApiError::not_found("Not found."))?;
-    if album.owner_user_id != Some(uid) && !can(&state.db, uid, "album:edit:any", None).await? {
+    if album.owner_user_id != Some(uid) && !user.0.can("album:edit:any", None) {
         return Err(ApiError::not_found("Not found."));
     }
     revoke_if_expired(
@@ -313,7 +313,7 @@ async fn patch_album(
     let album = albums::get_by_slug(&state.db, &slug)
         .await?
         .ok_or_else(|| ApiError::not_found("Not found."))?;
-    if !can(&state.db, uid, "album:edit", album.owner_user_id).await? {
+    if !user.0.can("album:edit", album.owner_user_id) {
         return Err(ApiError::forbidden("Not allowed."));
     }
     let body: Map<String, Value> = json_body(req, Some(&user.0.sid)).await?;
@@ -327,7 +327,7 @@ async fn patch_album(
     };
     // `typeof body.isPublic === "boolean"` — non-bool values are ignored.
     if let Some(Value::Bool(public)) = body.get("isPublic") {
-        if !can(&state.db, uid, "share:album", None).await? {
+        if !user.0.can("share:album", None) {
             return Err(ApiError::forbidden("Not allowed."));
         }
         expires_at = if *public {
@@ -393,7 +393,7 @@ async fn delete_album(
     let album = albums::get_by_slug(&state.db, &slug)
         .await?
         .ok_or_else(|| ApiError::not_found("Not found."))?;
-    if !can(&state.db, uid, "album:delete", album.owner_user_id).await? {
+    if !user.0.can("album:delete", album.owner_user_id) {
         return Err(ApiError::forbidden("Not allowed."));
     }
     albums::delete_by_id(&state.db, album.id).await?;
@@ -443,7 +443,7 @@ async fn upload_album_file(
     req: Request,
 ) -> Result<Response> {
     let uid = user.0.id;
-    if !can(&state.db, uid, "media:upload", None).await? {
+    if !user.0.can("media:upload", None) {
         return Err(ApiError::forbidden("Forbidden."));
     }
     if rate_limited(&state.db, Limiter::Api, &format!("upload:{uid}")).await {
@@ -467,7 +467,7 @@ async fn upload_album_file(
     let album = albums::get_by_slug(&state.db, &slug)
         .await?
         .ok_or_else(|| ApiError::not_found("Album not found."))?;
-    if !can(&state.db, uid, "album:edit", album.owner_user_id).await? {
+    if !user.0.can("album:edit", album.owner_user_id) {
         return Err(ApiError::forbidden("Not allowed."));
     }
 

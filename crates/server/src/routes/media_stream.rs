@@ -24,9 +24,9 @@ use serde::Deserialize;
 use serde_json::{Map, Value, json};
 
 use openshares_core::audit::audit;
+use openshares_core::crypto::password::SessionUser;
 use openshares_core::db::repos::{albums, media, shares};
 use openshares_core::models::Media;
-use openshares_core::rbac::can;
 
 use crate::body::{json_body, raw_body};
 use crate::error::{ApiError, Result};
@@ -57,10 +57,10 @@ async fn authorized(
     state: &AppState,
     media: &Media,
     token: Option<&str>,
-    user_id: Option<i64>,
+    user: Option<&SessionUser>,
 ) -> Result<bool> {
-    if let Some(uid) = user_id {
-        if media.owner_user_id == Some(uid) || can(&state.db, uid, "media:view", None).await? {
+    if let Some(u) = user {
+        if media.owner_user_id == Some(u.id) || u.can("media:view", None) {
             return Ok(true);
         }
     }
@@ -85,9 +85,8 @@ async fn get_media(
         .await?
         .ok_or_else(|| ApiError::not_found("Not found."))?;
 
-    let user_id = maybe_user.0.as_ref().map(|u| u.id);
     let token = query.token.as_deref().filter(|t| !t.is_empty());
-    if !authorized(&state, &media, token, user_id).await? {
+    if !authorized(&state, &media, token, maybe_user.0.as_ref()).await? {
         return Err(ApiError::forbidden("Not allowed."));
     }
     if media.availability == "telegram-only" {
@@ -216,7 +215,7 @@ async fn patch_media(
     let (Some(user), Some(media)) = (maybe_user.0, media) else {
         return Err(ApiError::forbidden("Not allowed."));
     };
-    if !can(&state.db, user.id, "media:edit", media.owner_user_id).await? {
+    if !user.can("media:edit", media.owner_user_id) {
         return Err(ApiError::forbidden("Not allowed."));
     }
 
@@ -249,7 +248,7 @@ async fn delete_media(
     let (Some(user), Some(media)) = (maybe_user.0, media) else {
         return Err(ApiError::forbidden("Not allowed."));
     };
-    if !can(&state.db, user.id, "media:delete", media.owner_user_id).await? {
+    if !user.can("media:delete", media.owner_user_id) {
         return Err(ApiError::forbidden("Not allowed."));
     }
 

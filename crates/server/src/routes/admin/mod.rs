@@ -35,7 +35,6 @@ use axum::{Json, Router};
 use serde_json::json;
 
 use openshares_core::crypto::password::SessionUser;
-use openshares_core::rbac;
 
 use crate::error::{ApiError, Result};
 use crate::state::AppState;
@@ -55,9 +54,10 @@ pub fn router() -> Router<AppState> {
 
 /// `apiGuard(key)` minus the session half (AuthUser already 401s):
 /// `can(userId, key)` or the rbac.ts `forbidden()` body
-/// `{ error: "Forbidden." }` at 403.
-async fn guard(state: &AppState, user: &SessionUser, key: &str) -> Result<()> {
-    if rbac::can(&state.db, user.id, key, None).await? {
+/// `{ error: "Forbidden." }` at 403. The perms rode in with the session —
+/// this is a pure in-memory check.
+async fn guard(_state: &AppState, user: &SessionUser, key: &str) -> Result<()> {
+    if user.can(key, None) {
         Ok(())
     } else {
         Err(ApiError::forbidden("Forbidden."))

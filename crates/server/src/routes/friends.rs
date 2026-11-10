@@ -22,7 +22,6 @@ use openshares_core::crypto::security::{Limiter, rate_limited};
 use openshares_core::db::now;
 use openshares_core::db::repos::friends::FriendRow;
 use openshares_core::db::repos::{friends, link_codes};
-use openshares_core::rbac::can;
 use openshares_core::util::new_token;
 
 use crate::body::{json_body, raw_body};
@@ -94,7 +93,7 @@ async fn create_invite(
     req: Request,
 ) -> Result<Response> {
     let uid = user.0.id;
-    if !can(&state.db, uid, "friend:invite", None).await? {
+    if !user.0.can("friend:invite", None) {
         return Err(ApiError::forbidden("Forbidden."));
     }
     if rate_limited(&state.db, Limiter::Api, &format!("friends:{uid}")).await {
@@ -158,7 +157,7 @@ async fn remove_friend(
     req: Request,
 ) -> Result<Response> {
     let uid = user.0.id;
-    if !can(&state.db, uid, "friend:remove", None).await? {
+    if !user.0.can("friend:remove", None) {
         return Err(ApiError::forbidden("Forbidden."));
     }
     raw_body(req, Some(&user.0.sid)).await?;

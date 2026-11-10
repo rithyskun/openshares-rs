@@ -29,16 +29,19 @@ pub fn router() -> Router<AppState> {
 async fn vault(State(state): State<AppState>, AuthUser(user): AuthUser) -> Result<Response> {
     guard(&state, &user, "admin:access").await?;
 
-    let (m, kinds, avail, a, s, u, owners) = (
-        media::totals(&state.db).await?,
-        media::counts_by_kind(&state.db).await?,
-        media::counts_by_availability(&state.db).await?,
-        albums::totals(&state.db).await?,
-        shares::totals(&state.db).await?,
-        users::totals(&state.db).await?,
-        media::top_owners(&state.db, TOP_OWNERS).await?,
+    // Seven independent aggregate queries — run them concurrently so the
+    // remote round trips overlap instead of stacking (≈7× RTT → ≈1×).
+    let (m, kinds, avail, a, s, u, owners) = tokio::join!(
+        media::totals(&state.db),
+        media::counts_by_kind(&state.db),
+        media::counts_by_availability(&state.db),
+        albums::totals(&state.db),
+        shares::totals(&state.db),
+        users::totals(&state.db),
+        media::top_owners(&state.db, TOP_OWNERS),
     );
 
+    let (m, kinds, avail, a, s, u, owners) = (m?, kinds?, avail?, a?, s?, u?, owners?);
     let by_kind: Map<String, Value> = kinds.into_iter().map(|(k, n)| (k, json!(n))).collect();
     let by_availability: Map<String, Value> =
         avail.into_iter().map(|(k, n)| (k, json!(n))).collect();

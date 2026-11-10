@@ -97,7 +97,7 @@ pub fn apply(router: Router<AppState>, state: AppState) -> Router<AppState> {
 ///
 /// Only this layer may short-circuit; the outer layers' post-processing
 /// still decorates whatever it returns (that's how `setSecurity` behaves).
-async fn gateway(State(state): State<AppState>, req: Request, next: Next) -> Response {
+async fn gateway(State(state): State<AppState>, mut req: Request, next: Next) -> Response {
     let path = req.uri().path().to_owned();
     let plan = csrf::plan(&req);
 
@@ -115,9 +115,23 @@ async fn gateway(State(state): State<AppState>, req: Request, next: Next) -> Res
         // check first. Fails open on DB errors (inside `rate_limit_info`).
         let tier = rate_limit::mw_tier(&path, req.method());
         let key = rate_limit::ip_key(&req);
-        let info = rate_limit_info(&state.db, tier, &key).await;
+        // Session resolution is independent of the limiter — each is its
+        // own remote round trip, so overlap them (a 429 wastes one read).
+        let cookie_header = req
+            .headers()
+            .get(axum::http::header::COOKIE)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_owned);
+        let (info, session) = tokio::join!(
+            rate_limit_info(&state.db, tier, &key),
+            crate::extract::resolve_cookie(&state, cookie_header.as_deref().unwrap_or_default()),
+        );
         if info.count > info.limit {
             return rate_limit::rejected(tier, &info);
+        }
+        if let Ok(session) = session {
+            req.extensions_mut()
+                .insert(crate::extract::EarlySession(session));
         }
 
         // CSRF validation for state-changing methods — before the route so

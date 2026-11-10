@@ -104,6 +104,22 @@ pub struct SessionUser {
     pub sid: String,
     /// when this session was created (the "signed in at" time).
     pub session_created_at: Option<i64>,
+    /// The user's resolved permission keys — fetched alongside the session
+    /// so `can()` checks don't each cost a remote round trip.
+    pub permissions: std::sync::Arc<std::collections::HashSet<String>>,
+}
+
+impl SessionUser {
+    /// `can(userId, key, ownerId)` — in-memory check over the perms fetched
+    /// with the session (same rule as `rbac::can`: `*` | `key` | `key:any`,
+    /// or `key:own` when `owner_id` is the caller).
+    pub fn can(&self, key: &str, owner_id: Option<i64>) -> bool {
+        let p = &self.permissions;
+        p.contains("*")
+            || p.contains(key)
+            || p.contains(&format!("{key}:any"))
+            || (owner_id == Some(self.id) && p.contains(&format!("{key}:own")))
+    }
 }
 
 /// Joined users+sessions row backing [`get_session_user_by_token`].
@@ -160,14 +176,20 @@ pub async fn get_session_user_by_token(
     let Ok(user_id) = claims.sub.parse::<i64>() else {
         return Ok(None);
     };
-    let row: Option<SessionRow> = db
-        .query_opt(
+    // Session row and permissions are independent lookups — run them
+    // concurrently so they cost one remote round trip, not two. (A dead
+    // session wastes the perms query, but it's parallel either way.)
+    let (row, perms) = tokio::join!(
+        db.query_opt::<SessionRow>(
             "SELECT u.id, u.email, u.name, u.telegram_id, s.created_at AS session_created_at
            FROM sessions s JOIN users u ON u.id = s.user_id
           WHERE s.id = ? AND s.user_id = ? AND s.expires_at > ? AND u.disabled_at IS NULL",
             libsql::params![claims.sid.as_str(), user_id, now()],
-        )
-        .await?;
+        ),
+        crate::rbac::permissions_of(db, user_id),
+    );
+    let row = row?;
+    let perms = perms?;
     Ok(row.map(|r| SessionUser {
         id: r.id,
         email: r.email,
@@ -175,6 +197,7 @@ pub async fn get_session_user_by_token(
         telegram_id: r.telegram_id,
         sid: claims.sid,
         session_created_at: r.session_created_at,
+        permissions: std::sync::Arc::new(perms),
     }))
 }
 

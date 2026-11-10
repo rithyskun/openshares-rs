@@ -36,7 +36,6 @@ use openshares_core::db::repos::media::{
 };
 use openshares_core::db::repos::{albums, friends, media, shares};
 use openshares_core::db::{PUBLIC_LINK_TTL, now};
-use openshares_core::rbac::can;
 use openshares_core::util::{new_token, parse_int_prefix};
 
 use crate::body::json_body;
@@ -75,7 +74,7 @@ async fn list_media(
     RawQuery(raw): RawQuery,
 ) -> Result<Response> {
     let uid = user.0.id;
-    if !can(&state.db, uid, "media:view", None).await? {
+    if !user.0.can("media:view", None) {
         return Err(ApiError::forbidden("Not allowed."));
     }
     let get = |key: &str| param_get(raw.as_deref(), key);
@@ -87,8 +86,7 @@ async fn list_media(
         let album = albums::get_by_slug(&state.db, album_slug).await?;
         match album {
             Some(album)
-                if album.owner_user_id == Some(uid)
-                    || can(&state.db, uid, "album:edit:any", None).await? =>
+                if album.owner_user_id == Some(uid) || user.0.can("album:edit:any", None) =>
             {
                 MediaScope::Album(album.id)
             }
@@ -249,7 +247,7 @@ fn album_cursor(s: &str) -> Option<MediaCursor> {
 /// the gallery header (the old page's inline `COUNT(*)`/`SUM(file_size)`).
 /// Same `media:view` gate as the listing.
 async fn media_summary(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
-    if !can(&state.db, user.0.id, "media:view", None).await? {
+    if !user.0.can("media:view", None) {
         return Err(ApiError::forbidden("Not allowed."));
     }
     let t = media::totals(&state.db).await?;
@@ -271,10 +269,10 @@ async fn list_share_links(
     let media = media::get_by_slug(&state.db, &slug)
         .await?
         .ok_or_else(|| ApiError::not_found("Not found."))?;
-    if !can(&state.db, uid, "share:link", None).await? {
+    if !user.0.can("share:link", None) {
         return Err(ApiError::forbidden("Not allowed."));
     }
-    let see_all = can(&state.db, uid, "media:delete:any", None).await?;
+    let see_all = user.0.can("media:delete:any", None);
     let rows =
         shares::list_links(&state.db, media.id, if see_all { None } else { Some(uid) }).await?;
 
@@ -318,14 +316,14 @@ async fn revoke_share_link(
     let media = media::get_by_slug(&state.db, &slug)
         .await?
         .ok_or_else(|| ApiError::not_found("Not found."))?;
-    if !can(&state.db, uid, "share:link", None).await? {
+    if !user.0.can("share:link", None) {
         return Err(ApiError::forbidden("Not allowed."));
     }
     let Some(created_by) = shares::get_link_creator(&state.db, media.id, token).await? else {
         return Err(ApiError::not_found("Link not found."));
     };
     let own = created_by == Some(uid);
-    if !own && !can(&state.db, uid, "media:delete:any", None).await? {
+    if !own && !user.0.can("media:delete:any", None) {
         return Err(ApiError::forbidden("Not allowed."));
     }
 
@@ -368,7 +366,7 @@ async fn create_share(
         .unwrap_or_default()
     {
         "link" => {
-            if !can(&state.db, uid, "share:link", None).await? {
+            if !user.0.can("share:link", None) {
                 return Err(ApiError::forbidden("Not allowed."));
             }
             let token = new_token(16);
@@ -393,7 +391,7 @@ async fn create_share(
             .into_response())
         }
         "telegram" => {
-            if !can(&state.db, uid, "share:friend", None).await? {
+            if !user.0.can("share:friend", None) {
                 return Err(ApiError::forbidden("Not allowed."));
             }
             // `Number(body.friend_id ?? -1)` — strings coerce, anything
@@ -550,7 +548,7 @@ async fn move_media(
             let album = albums::get_by_id(&state.db, id)
                 .await?
                 .ok_or_else(|| ApiError::not_found("Album not found."))?;
-            if !can(&state.db, uid, "album:edit", album.owner_user_id).await? {
+            if !user.0.can("album:edit", album.owner_user_id) {
                 return Err(ApiError::forbidden("Not allowed."));
             }
             Some(album)
@@ -571,7 +569,7 @@ async fn move_media(
         let allowed = match owner_allowed.get(&row.owner_user_id) {
             Some(v) => *v,
             None => {
-                let v = can(&state.db, uid, "media:edit", row.owner_user_id).await?;
+                let v = user.0.can("media:edit", row.owner_user_id);
                 owner_allowed.insert(row.owner_user_id, v);
                 v
             }
