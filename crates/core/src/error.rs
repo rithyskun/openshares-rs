@@ -12,10 +12,7 @@ pub enum AppError {
     Config(String),
 
     #[error("database error: {0}")]
-    Database(#[from] sqlx::Error),
-
-    #[error("migration error: {0}")]
-    Migration(#[from] sqlx::migrate::MigrateError),
+    Database(#[from] libsql::Error),
 
     #[error("telegram api error: {0}")]
     Telegram(String),

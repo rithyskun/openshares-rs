@@ -2,7 +2,7 @@
 //! (auth.ts / handler.ts) plus date formatting the bot texts need.
 
 use base64::Engine;
-use rand::{Rng, RngCore};
+use rand::{Rng, RngExt};
 
 /// `newToken(bytes)` — `crypto.randomBytes(bytes).toString("base64url")`.
 pub fn new_token(bytes: usize) -> String {

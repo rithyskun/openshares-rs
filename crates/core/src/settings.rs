@@ -8,23 +8,27 @@ use crate::error::Result;
 
 /// `getSetting` — `SELECT value FROM settings WHERE key = ?`.
 pub async fn get_setting(db: &Db, key: &str) -> Result<Option<String>> {
-    let row: Option<(String,)> = sqlx::query_as("SELECT value FROM settings WHERE key = ?")
-        .bind(key)
-        .fetch_optional(db.pool())
+    // Read inside `next()` — local-driver rows are bound to the shared
+    // statement cursor (see `Db::conn` caveat).
+    let mut rows = db
+        .query_guard(
+            "SELECT value FROM settings WHERE key = ?",
+            libsql::params![key],
+        )
         .await?;
-    Ok(row.map(|(v,)| v))
+    match rows.next().await? {
+        Some(row) => Ok(Some(row.get::<String>(0)?)),
+        None => Ok(None),
+    }
 }
 
 /// `setSetting` — upsert on the `key` primary key.
 pub async fn set_setting(db: &Db, key: &str, value: &str) -> Result<()> {
-    sqlx::query(
+    db.execute(
         "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?)
          ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at",
+        libsql::params![key, value, now()],
     )
-    .bind(key)
-    .bind(value)
-    .bind(now())
-    .execute(db.pool())
     .await?;
     Ok(())
 }

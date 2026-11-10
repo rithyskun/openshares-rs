@@ -1,6 +1,11 @@
 # Build artifacts — never send the 1.7GB target dir to the daemon
 target/
 
+# Frontend build artifacts — npm ci + next build run inside the image
+web/node_modules/
+web/.next/
+web/out/
+
 # Runtime data (sqlite db, media cache, audit shards)
 data/
 

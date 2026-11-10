@@ -12,8 +12,10 @@ authors = ["Rithy Skun <rithy.skun@outlook.com>"]
 [workspace.dependencies]
 # Async runtime + web framework
 tokio = { version = "1", features = ["full"] }
+# ReaderStream — AsyncRead → Stream for Body::from_stream (media.rs)
+tokio-util = { version = "0.7", features = ["io"] }
 axum = "0.8"
-tower = "0.5"
+tower = { version = "0.5", features = ["util"] }
 tower-http = { version = "0.6", features = ["trace"] }
 
 # Serialization
@@ -37,32 +39,22 @@ reqwest = { version = "0.12", default-features = false, features = [
     "multipart",
 ] }
 
-# Database — sqlx + SQLite. The schema is reused verbatim from
-# openshares-main/migrations (plain SQLite). A libsql/Turso client can be
-# swapped in later without touching repositories.
-sqlx = { version = "0.8", default-features = false, features = [
-    "runtime-tokio",
-    "sqlite",
-    "chrono",
-    "migrate",
-    "macros",
-] }
-
 # Media cache keys — sha1(file_id) + ext, same as storage.ts
 sha1 = "0.10"
 
 # Bot utils — newToken (base64url) + randomSlug
-rand = "0.9"
+rand = "0.10"
 base64 = "0.22"
 
 # Tests — temp cache dirs
 tempfile = "3"
 
-# Phase 6 crypto (added to crates/core as each module lands):
-# base64 = "0.22"
-# sha2 = "0.10"
-# hmac = "0.12"
-# aes-gcm = "0.10"
-# rsa = { version = "0.9", features = ["sha2"] }
-# scrypt = "0.11"
-# jsonwebtoken = "9"
+# Phase 6 crypto — used by crates/core/src/crypto/*
+sha2 = "0.11"
+hmac = "0.13"
+aes-gcm = "0.10"
+rsa = { version = "0.10" }
+scrypt = "0.11"
+jsonwebtoken = "9"
+subtle = "2"
+zeroize = "1"

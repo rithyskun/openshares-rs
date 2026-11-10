@@ -1,0 +1,240 @@
+@import "tailwindcss";
+
+@layer base {
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  /* Shared control surface — one solid-light chip for every button, select
+     and text field (IG-style). Component utilities still win for layout
+     (padding/radius/width); keep bg-/text- utility classes OFF controls or they
+     fight these vars. */
+  button,
+  select,
+  textarea,
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="image"]):not([type="color"]) {
+    background-color: var(--control-bg);
+    color: var(--control-ink);
+    border: 1px solid var(--control-line);
+    font: inherit;
+  }
+  /* Text fields get a quieter edge — the chip fill already separates them. */
+  input:not([type="checkbox"]):not([type="radio"]):not([type="range"]):not([type="file"]):not([type="hidden"]):not([type="submit"]):not([type="button"]):not([type="image"]):not([type="color"]),
+  textarea {
+    border-color: var(--control-line-soft);
+  }
+  button:not(:disabled):hover,
+  select:not(:disabled):hover {
+    filter: brightness(0.95);
+  }
+  button:not(:disabled):active {
+    filter: brightness(0.9);
+  }
+}
+
+/* ---------------------------------------------------------------------------
+ * Theme — data-theme on <html> is "dark" | "light" | "auto" (auto follows the
+ * OS via the media query below; set by the inline script in layout.tsx).
+ * Every var has a dark default so the app renders dark when JS hasn't run.
+ * The override block at the bottom remaps the app's dark utility classes
+ * (text-slate-*, bg-white/*, border-white/*, bg-black/*) onto these vars, so
+ * components don't need per-theme classes — accents (teal/sky/rose) stay literal.
+ * ------------------------------------------------------------------------ */
+
+@theme inline {
+  --color-paper: var(--paper);
+  --color-menu: var(--menu);
+  --color-control: var(--control-bg);
+  --color-control-ink: var(--control-ink);
+  --color-control-line: var(--control-line);
+}
+
+:root,
+[data-theme="dark"] {
+  color-scheme: dark;
+  --paper: #0b0e14;
+  --menu: #10141d;
+  --ink: #f1f5f9;
+  --ink-200: #e2e8f0;
+  --ink-300: #cbd5e1;
+  --mute: #94a3b8;
+  --faint: #64748b;
+  --faintest: #475569;
+  --surface-2: rgb(255 255 255 / 0.03);
+  --surface: rgb(255 255 255 / 0.055);
+  --surface-up: rgb(255 255 255 / 0.1);
+  --surface-hover: rgb(255 255 255 / 0.07);
+  --inset: rgb(0 0 0 / 0.35);
+  --inset-deep: rgb(0 0 0 / 0.55);
+  --line-soft: rgb(255 255 255 / 0.06);
+  --line: rgb(255 255 255 / 0.13);
+  --line-strong: rgb(255 255 255 / 0.22);
+  /* Control chips stay light in both themes — the IG comment-input look. */
+  --control-bg: #e4e9f2;
+  --control-ink: #0f172a;
+  --control-line: rgb(15 23 42 / 0.16);
+  --control-line-soft: rgb(15 23 42 / 0.1);
+}
+
+[data-theme="light"] {
+  color-scheme: light;
+  --paper: #eef1f6;
+  --menu: #ffffff;
+  --ink: #0f172a;
+  --ink-200: #1e293b;
+  --ink-300: #334155;
+  --mute: #475569;
+  --faint: #64748b;
+  --faintest: #94a3b8;
+  --surface-2: rgb(255 255 255 / 0.65);
+  --surface: rgb(255 255 255 / 0.9);
+  --surface-up: rgb(255 255 255 / 1);
+  --surface-hover: rgb(255 255 255 / 1);
+  --inset: rgb(255 255 255 / 0.8);
+  --inset-deep: rgb(226 232 240 / 0.8);
+  --line-soft: rgb(15 23 42 / 0.08);
+  --line: rgb(15 23 42 / 0.13);
+  --line-strong: rgb(15 23 42 / 0.22);
+  --control-bg: #ffffff;
+  --control-ink: #0f172a;
+  --control-line: rgb(15 23 42 / 0.16);
+  --control-line-soft: rgb(15 23 42 / 0.1);
+}
+
+@media (prefers-color-scheme: light) {
+  [data-theme="auto"] {
+    color-scheme: light;
+    --paper: #eef1f6;
+    --menu: #ffffff;
+    --ink: #0f172a;
+    --ink-200: #1e293b;
+    --ink-300: #334155;
+    --mute: #475569;
+    --faint: #64748b;
+    --faintest: #94a3b8;
+    --surface-2: rgb(255 255 255 / 0.65);
+    --surface: rgb(255 255 255 / 0.9);
+    --surface-up: rgb(255 255 255 / 1);
+    --surface-hover: rgb(255 255 255 / 1);
+    --inset: rgb(255 255 255 / 0.8);
+    --inset-deep: rgb(226 232 240 / 0.8);
+    --line-soft: rgb(15 23 42 / 0.08);
+    --line: rgb(15 23 42 / 0.13);
+    --line-strong: rgb(15 23 42 / 0.22);
+    --control-bg: #ffffff;
+    --control-ink: #0f172a;
+    --control-line: rgb(15 23 42 / 0.16);
+    --control-line-soft: rgb(15 23 42 / 0.1);
+  }
+}
+
+html,
+body {
+  height: 100%;
+}
+
+/* The page never scrolls — <main> is the only scroller (app-shell layout), so
+   the header stays pinned and the scrollbar lives inside the content area. */
+.scroll-shell {
+  min-height: 0;
+  flex: 1 1 0%;
+  overflow-y: auto;
+  /* Reserve the gutter on every page so the centered .shell doesn't shift
+     sideways when only some pages are tall enough to scroll. */
+  scrollbar-gutter: stable;
+}
+
+/* Shared page container — header, main, and any aligned chrome use this so
+   left/right edges line up exactly. Safe-area-aware for landscape notches. */
+.shell {
+  margin-inline: auto;
+  width: 100%;
+  max-width: 72rem; /* max-w-6xl */
+  padding-left: max(1rem, env(safe-area-inset-left));
+  padding-right: max(1rem, env(safe-area-inset-right));
+}
+
+body {
+  background:
+    radial-gradient(1200px 600px at 80% -10%, rgba(56, 189, 248, 0.08), transparent 60%),
+    radial-gradient(900px 500px at 10% 110%, rgba(45, 212, 191, 0.06), transparent 60%),
+    var(--paper);
+}
+
+::selection {
+  background: rgba(45, 212, 191, 0.35);
+}
+
+*::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+*::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.25);
+  border-radius: 999px;
+}
+
+/* ---- Theme remap: dark utilities resolve through the vars above ---------- */
+
+[data-theme] .text-white {
+  color: var(--ink);
+}
+[data-theme] .text-slate-100,
+[data-theme] .text-slate-200 {
+  color: var(--ink-200);
+}
+[data-theme] .text-slate-300 {
+  color: var(--ink-300);
+}
+[data-theme] .text-slate-400 {
+  color: var(--mute);
+}
+[data-theme] .text-slate-500 {
+  color: var(--faint);
+}
+[data-theme] .text-slate-600 {
+  color: var(--faintest);
+}
+
+[data-theme] .bg-white {
+  background-color: var(--surface-up);
+}
+[data-theme] .bg-white\/2,
+[data-theme] .bg-white\/3 {
+  background-color: var(--surface-2);
+}
+[data-theme] .bg-white\/5,
+[data-theme] .bg-white\/10 {
+  background-color: var(--surface);
+}
+[data-theme] .bg-black\/30,
+[data-theme] .bg-black\/40 {
+  background-color: var(--inset);
+}
+[data-theme] .bg-black\/70,
+[data-theme] .bg-black\/80 {
+  background-color: var(--inset-deep);
+}
+/* Fullscreen viewers (bg-black/95, /90) intentionally stay dark in light mode —
+   photos read better on black chrome. */
+
+[data-theme] .border-white\/5,
+[data-theme] .border-white\/10,
+[data-theme] .divide-white\/5 > * + * {
+  border-color: var(--line-soft);
+}
+[data-theme] .border-white\/20,
+[data-theme] .border-white\/25 {
+  border-color: var(--line-strong);
+}
+[data-theme] .hover\:bg-white\/5:hover,
+[data-theme] .hover\:bg-white\/10:hover {
+  background-color: var(--surface-hover);
+}
+[data-theme] .hover\:text-white:hover {
+  color: var(--ink);
+}
+[data-theme] ::placeholder {
+  color: var(--faintest);
+}

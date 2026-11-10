@@ -13,7 +13,6 @@ use std::sync::{Mutex, OnceLock};
 
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sqlx::FromRow;
 
 use crate::audit::audit;
 use crate::db::{Db, PUBLIC_LINK_TTL, now};
@@ -62,7 +61,7 @@ pub struct TgCallbackQuery {
     pub data: Option<String>,
 }
 
-/// Everything the handlers need — cheap to clone (pool/client handles).
+/// Everything the handlers need — cheap to clone (db/client handles).
 #[derive(Clone)]
 pub struct BotContext {
     pub db: Db,
@@ -73,9 +72,9 @@ pub struct BotContext {
 
 const HELP: &str = "Send me photos or videos and I'll store them so you can manage and share them from the web app.\n\nTap-friendly — no need to type commands:\n/albums - open your album menu (view, share, add photos — all buttons)\n/newalbum TITLE - create an album (or just /newalbum and reply with a title)\n\nPower commands:\n/upload N|TITLE - file next sends into an album\n/view N · /share N · /unshare N - act on album N from /albums\n/done - finish uploading / cancel input\n\nTip: select several photos at once and they become a private album automatically — the group's caption becomes its name, and you'll get buttons to manage it.\n\n/start CODE - accept a friend invite\n/link CODE - attach this chat to your web account\n/add CODE - become a friend of someone (one-time code)\n/stats - how much you have stored\n/help - this message";
 
-// ── Row types (sqlx::FromRow; column aliases match the SELECTs) ──────
+// ── Row types (serde::Deserialize; column aliases match the SELECTs) ─
 
-#[derive(FromRow)]
+#[derive(Deserialize)]
 struct LinkCodeRow {
     purpose: String,
     user_id: Option<i64>,
@@ -83,7 +82,7 @@ struct LinkCodeRow {
     expiry_at: Option<i64>,
 }
 
-#[derive(Debug, Clone, FromRow)]
+#[derive(Debug, Clone, Deserialize)]
 pub struct AlbumEntry {
     pub id: i64,
     pub slug: String,
@@ -95,32 +94,32 @@ pub struct AlbumEntry {
     pub items: i64,
 }
 
-#[derive(FromRow)]
+#[derive(Deserialize)]
 struct AlbumItem {
     id: i64,
     kind: String,
     file_id: String,
 }
 
-#[derive(FromRow)]
+#[derive(Deserialize)]
 struct BotStateRow {
     action: String,
     album_id: Option<i64>,
     updated_at: i64,
 }
 
-#[derive(FromRow)]
+#[derive(Deserialize)]
 struct NameTelegramRow {
     name: String,
     telegram_id: Option<String>,
 }
 
-#[derive(FromRow)]
+#[derive(Deserialize)]
 struct TitleRow {
     title: String,
 }
 
-#[derive(FromRow)]
+#[derive(Deserialize)]
 struct AlbumTokenRow {
     id: i64,
     title: String,
@@ -129,13 +128,13 @@ struct AlbumTokenRow {
     owner_name: Option<String>,
 }
 
-#[derive(FromRow)]
+#[derive(Deserialize)]
 struct GroupHitRow {
     album_id: i64,
     title: String,
 }
 
-#[derive(FromRow)]
+#[derive(Deserialize)]
 struct StatsRow {
     photos: i64,
     videos: i64,
@@ -162,7 +161,7 @@ async fn need_link_text(ctx: &BotContext) -> anyhow::Result<String> {
 
 /// `upsertTelegramUser` — refresh the telegram_users profile row.
 pub async fn upsert_telegram_user(db: &Db, from: &TgUser) -> anyhow::Result<()> {
-    sqlx::query(
+    db.execute(
         "INSERT INTO telegram_users (telegram_id, username, first_name, last_name, updated_at)
          VALUES (?, ?, ?, ?, ?)
          ON CONFLICT(telegram_id) DO UPDATE SET
@@ -170,22 +169,25 @@ pub async fn upsert_telegram_user(db: &Db, from: &TgUser) -> anyhow::Result<()> 
            first_name = excluded.first_name,
            last_name = excluded.last_name,
            updated_at = excluded.updated_at",
+        libsql::params![
+            from.id.to_string(),
+            from.username.as_deref(),
+            from.first_name.as_deref(),
+            from.last_name.as_deref(),
+            now()
+        ],
     )
-    .bind(from.id.to_string())
-    .bind(from.username.as_deref())
-    .bind(from.first_name.as_deref())
-    .bind(from.last_name.as_deref())
-    .bind(now())
-    .execute(db.pool())
     .await?;
     Ok(())
 }
 
 /// `getLinkedUserId` — web account bound to this telegram id, if any.
 pub async fn get_linked_user_id(db: &Db, telegram_id: i64) -> anyhow::Result<Option<i64>> {
-    let row: Option<i64> = sqlx::query_scalar("SELECT id FROM users WHERE telegram_id = ?")
-        .bind(telegram_id.to_string())
-        .fetch_optional(db.pool())
+    let row: Option<i64> = db
+        .scalar_opt(
+            "SELECT id FROM users WHERE telegram_id = ?",
+            libsql::params![telegram_id.to_string()],
+        )
         .await?;
     Ok(row)
 }
@@ -198,11 +200,13 @@ async fn handle_start_code(
     code: &str,
     chat_id: i64,
 ) -> anyhow::Result<()> {
-    let row: Option<LinkCodeRow> =
-        sqlx::query_as("SELECT purpose, user_id, used, expiry_at FROM link_codes WHERE code = ?")
-            .bind(code)
-            .fetch_optional(ctx.db.pool())
-            .await?;
+    let row: Option<LinkCodeRow> = ctx
+        .db
+        .query_opt(
+            "SELECT purpose, user_id, used, expiry_at FROM link_codes WHERE code = ?",
+            libsql::params![code],
+        )
+        .await?;
 
     let Some(row) = row else {
         reply(
@@ -248,25 +252,27 @@ async fn handle_start_code(
             .await;
             return Ok(());
         };
-        sqlx::query(
-            "INSERT OR IGNORE INTO friend_links (owner_user_id, friend_telegram_id, created_at)
-             VALUES (?, ?, ?)",
-        )
-        .bind(owner_id)
-        .bind(from.id.to_string())
-        .bind(now())
-        .execute(ctx.db.pool())
-        .await?;
-        sqlx::query("UPDATE link_codes SET used = 1 WHERE code = ?")
-            .bind(code)
-            .execute(ctx.db.pool())
+        ctx.db
+            .execute(
+                "INSERT OR IGNORE INTO friend_links (owner_user_id, friend_telegram_id, created_at)
+                 VALUES (?, ?, ?)",
+                libsql::params![owner_id, from.id.to_string(), now()],
+            )
+            .await?;
+        ctx.db
+            .execute(
+                "UPDATE link_codes SET used = 1 WHERE code = ?",
+                libsql::params![code],
+            )
             .await?;
 
-        let owner: Option<NameTelegramRow> =
-            sqlx::query_as("SELECT name, telegram_id FROM users WHERE id = ?")
-                .bind(owner_id)
-                .fetch_optional(ctx.db.pool())
-                .await?;
+        let owner: Option<NameTelegramRow> = ctx
+            .db
+            .query_opt(
+                "SELECT name, telegram_id FROM users WHERE id = ?",
+                libsql::params![owner_id],
+            )
+            .await?;
         let owner_name = owner
             .as_ref()
             .map(|o| o.name.clone())
@@ -312,9 +318,11 @@ async fn handle_start_code(
             return Ok(());
         };
         link_user_to_telegram(ctx, user_id, from, chat_id).await?;
-        sqlx::query("UPDATE link_codes SET used = 1 WHERE code = ?")
-            .bind(code)
-            .execute(ctx.db.pool())
+        ctx.db
+            .execute(
+                "UPDATE link_codes SET used = 1 WHERE code = ?",
+                libsql::params![code],
+            )
             .await?;
         return Ok(());
     }
@@ -362,24 +370,25 @@ async fn link_user_to_telegram(
             .clone()
             .unwrap_or_else(|| escape_html(&display_name(Some(from))))
     );
-    sqlx::query("UPDATE users SET telegram_id = ?, bot_profile = ?, updated_at = ? WHERE id = ?")
-        .bind(from.id.to_string())
-        .bind(bot_profile)
-        .bind(now())
-        .bind(user_id)
-        .execute(ctx.db.pool())
+    ctx.db
+        .execute(
+            "UPDATE users SET telegram_id = ?, bot_profile = ?, updated_at = ? WHERE id = ?",
+            libsql::params![from.id.to_string(), bot_profile, now(), user_id],
+        )
         .await?;
     // Adopt any media this telegram user sent before linking.
-    sqlx::query(
-        "UPDATE media SET owner_user_id = ? WHERE telegram_id = ? AND owner_user_id IS NULL",
-    )
-    .bind(user_id)
-    .bind(from.id.to_string())
-    .execute(ctx.db.pool())
-    .await?;
-    let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM media WHERE owner_user_id = ?")
-        .bind(user_id)
-        .fetch_one(ctx.db.pool())
+    ctx.db
+        .execute(
+            "UPDATE media SET owner_user_id = ? WHERE telegram_id = ? AND owner_user_id IS NULL",
+            libsql::params![user_id, from.id.to_string()],
+        )
+        .await?;
+    let count: i64 = ctx
+        .db
+        .scalar(
+            "SELECT COUNT(*) FROM media WHERE owner_user_id = ?",
+            libsql::params![user_id],
+        )
         .await?;
     reply(
         ctx,
@@ -398,11 +407,12 @@ async fn link_user_to_telegram(
 // ── bot conversation state (bot_state table) ────────────────────────
 
 async fn get_bot_state(db: &Db, tg_id: &str) -> anyhow::Result<Option<BotStateRow>> {
-    let row: Option<BotStateRow> =
-        sqlx::query_as("SELECT action, album_id, updated_at FROM bot_state WHERE telegram_id = ?")
-            .bind(tg_id)
-            .fetch_optional(db.pool())
-            .await?;
+    let row: Option<BotStateRow> = db
+        .query_opt(
+            "SELECT action, album_id, updated_at FROM bot_state WHERE telegram_id = ?",
+            libsql::params![tg_id],
+        )
+        .await?;
     Ok(row)
 }
 
@@ -412,25 +422,22 @@ async fn set_bot_state(
     action: &str,
     album_id: Option<i64>,
 ) -> anyhow::Result<()> {
-    sqlx::query(
+    db.execute(
         "INSERT INTO bot_state (telegram_id, action, album_id, updated_at) VALUES (?, ?, ?, ?)
          ON CONFLICT(telegram_id) DO UPDATE SET
            action = excluded.action, album_id = excluded.album_id, updated_at = excluded.updated_at",
+        libsql::params![tg_id, action, album_id, now()],
     )
-    .bind(tg_id)
-    .bind(action)
-    .bind(album_id)
-    .bind(now())
-    .execute(db.pool())
     .await?;
     Ok(())
 }
 
 async fn clear_bot_state(db: &Db, tg_id: &str) -> anyhow::Result<()> {
-    sqlx::query("DELETE FROM bot_state WHERE telegram_id = ?")
-        .bind(tg_id)
-        .execute(db.pool())
-        .await?;
+    db.execute(
+        "DELETE FROM bot_state WHERE telegram_id = ?",
+        libsql::params![tg_id],
+    )
+    .await?;
     Ok(())
 }
 
@@ -443,20 +450,24 @@ const ALBUM_SELECT: &str =
 
 /// `listAlbums` — owner's albums newest-first with media counts.
 async fn list_albums(db: &Db, owner_id: i64) -> anyhow::Result<Vec<AlbumEntry>> {
-    let rows = sqlx::query_as::<_, AlbumEntry>(&format!(
-        "{ALBUM_SELECT} WHERE a.owner_user_id = ? ORDER BY a.created_at DESC, a.id DESC"
-    ))
-    .bind(owner_id)
-    .fetch_all(db.pool())
-    .await?;
+    let rows = db
+        .query_all::<AlbumEntry>(
+            &format!(
+                "{ALBUM_SELECT} WHERE a.owner_user_id = ? ORDER BY a.created_at DESC, a.id DESC"
+            ),
+            libsql::params![owner_id],
+        )
+        .await?;
     Ok(rows)
 }
 
 /// `loadAlbum` — single album by id (any owner; callers check ownership).
 async fn load_album(db: &Db, id: i64) -> anyhow::Result<Option<AlbumEntry>> {
-    let row: Option<AlbumEntry> = sqlx::query_as(&format!("{ALBUM_SELECT} WHERE a.id = ?"))
-        .bind(id)
-        .fetch_optional(db.pool())
+    let row: Option<AlbumEntry> = db
+        .query_opt(
+            &format!("{ALBUM_SELECT} WHERE a.id = ?"),
+            libsql::params![id],
+        )
         .await?;
     Ok(row)
 }
@@ -486,7 +497,7 @@ async fn pick_album(
 }
 
 /// Shared INSERT for /newalbum, /upload TITLE and media-group drops.
-/// Returns `(id, slug)` — `lastInsertRowid` plus the generated slug.
+/// Returns `(id, slug)` — the `RETURNING id` rowid plus the generated slug.
 async fn insert_album_ctx(
     ctx: &BotContext,
     owner_id: i64,
@@ -494,17 +505,14 @@ async fn insert_album_ctx(
     audit_detail: &str,
 ) -> anyhow::Result<(i64, String)> {
     let slug = random_slug();
-    let res = sqlx::query(
-        "INSERT INTO albums (slug, owner_user_id, title, token, is_public, views, created_at)
-         VALUES (?, ?, ?, ?, 0, 0, ?)",
-    )
-    .bind(&slug)
-    .bind(owner_id)
-    .bind(title)
-    .bind(new_token(16))
-    .bind(now())
-    .execute(ctx.db.pool())
-    .await?;
+    let id: i64 = ctx
+        .db
+        .scalar(
+            "INSERT INTO albums (slug, owner_user_id, title, token, is_public, views, created_at)
+             VALUES (?, ?, ?, ?, 0, 0, ?) RETURNING id",
+            libsql::params![slug.as_str(), owner_id, title, new_token(16), now()],
+        )
+        .await?;
     audit(
         &ctx.cache,
         Some(owner_id),
@@ -514,7 +522,7 @@ async fn insert_album_ctx(
         Some(audit_detail),
     )
     .await;
-    Ok((res.last_insert_rowid(), slug))
+    Ok((id, slug))
 }
 
 async fn create_album(
@@ -557,21 +565,22 @@ async fn create_album(
 }
 
 async fn fetch_album_items(db: &Db, album_id: i64) -> anyhow::Result<Vec<AlbumItem>> {
-    let rows = sqlx::query_as::<_, AlbumItem>(
-        "SELECT id, kind, file_id FROM media WHERE album_id = ? AND missing = 0 ORDER BY id ASC LIMIT 51",
-    )
-    .bind(album_id)
-    .fetch_all(db.pool())
-    .await?;
+    let rows = db
+        .query_all::<AlbumItem>(
+            "SELECT id, kind, file_id FROM media WHERE album_id = ? AND missing = 0 ORDER BY id ASC LIMIT 51",
+            libsql::params![album_id],
+        )
+        .await?;
     Ok(rows)
 }
 
 async fn dead_item_count(db: &Db, album_id: i64) -> anyhow::Result<i64> {
-    let n: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM media WHERE album_id = ? AND missing = 1")
-            .bind(album_id)
-            .fetch_one(db.pool())
-            .await?;
+    let n: i64 = db
+        .scalar(
+            "SELECT COUNT(*) FROM media WHERE album_id = ? AND missing = 1",
+            libsql::params![album_id],
+        )
+        .await?;
     Ok(n)
 }
 
@@ -599,9 +608,12 @@ async fn send_album_item(
         Err(e) => {
             tracing::warn!(error = %e, media_id = m.id, "[bot] album item send failed");
             if is_dead_file_error(&e) {
-                let _ = sqlx::query("UPDATE media SET missing = 1 WHERE id = ?")
-                    .bind(m.id)
-                    .execute(ctx.db.pool())
+                let _ = ctx
+                    .db
+                    .execute(
+                        "UPDATE media SET missing = 1 WHERE id = ?",
+                        libsql::params![m.id],
+                    )
                     .await;
                 stats.dead += 1;
             } else {
@@ -856,10 +868,11 @@ async fn do_share(
     let fresh = album.is_public == 0 || expired;
     let expires_at = if fresh {
         let e = now() + PUBLIC_LINK_TTL;
-        sqlx::query("UPDATE albums SET is_public = 1, public_expires_at = ? WHERE id = ?")
-            .bind(e)
-            .bind(album.id)
-            .execute(ctx.db.pool())
+        ctx.db
+            .execute(
+                "UPDATE albums SET is_public = 1, public_expires_at = ? WHERE id = ?",
+                libsql::params![e, album.id],
+            )
             .await?;
         Some(e)
     } else {
@@ -936,9 +949,11 @@ async fn do_unshare(
         .await;
         return Ok(false);
     }
-    sqlx::query("UPDATE albums SET is_public = 0, public_expires_at = NULL WHERE id = ?")
-        .bind(album.id)
-        .execute(ctx.db.pool())
+    ctx.db
+        .execute(
+            "UPDATE albums SET is_public = 0, public_expires_at = NULL WHERE id = ?",
+            libsql::params![album.id],
+        )
         .await?;
     reply(
         ctx,
@@ -1118,18 +1133,20 @@ async fn finish_pending(ctx: &BotContext, tg_id: &str, chat_id: i64) -> anyhow::
     clear_bot_state(&ctx.db, tg_id).await?;
     if state.action == "album_upload" {
         if let Some(album_id) = state.album_id {
-            let title: Option<String> =
-                sqlx::query_scalar::<_, String>("SELECT title FROM albums WHERE id = ?")
-                    .bind(album_id)
-                    .fetch_optional(ctx.db.pool())
-                    .await?;
-            let added: i64 = sqlx::query_scalar(
-                "SELECT COUNT(*) FROM media WHERE album_id = ? AND created_at >= ?",
-            )
-            .bind(album_id)
-            .bind(state.updated_at)
-            .fetch_one(ctx.db.pool())
-            .await?;
+            let title: Option<String> = ctx
+                .db
+                .scalar_opt(
+                    "SELECT title FROM albums WHERE id = ?",
+                    libsql::params![album_id],
+                )
+                .await?;
+            let added: i64 = ctx
+                .db
+                .scalar(
+                    "SELECT COUNT(*) FROM media WHERE album_id = ? AND created_at >= ?",
+                    libsql::params![album_id, state.updated_at],
+                )
+                .await?;
             reply(
                 ctx,
                 chat_id,
@@ -1320,14 +1337,15 @@ async fn handle_callback(ctx: &BotContext, cb: &TgCallbackQuery) -> anyhow::Resu
 // ── /start album_<token> — public album deep link ───────────────────
 
 async fn handle_album_view(ctx: &BotContext, token: &str, chat_id: i64) -> anyhow::Result<()> {
-    let album: Option<AlbumTokenRow> = sqlx::query_as(
-        "SELECT a.id, a.title, a.is_public, a.public_expires_at, u.name AS owner_name
-           FROM albums a LEFT JOIN users u ON u.id = a.owner_user_id
-          WHERE a.token = ?",
-    )
-    .bind(token)
-    .fetch_optional(ctx.db.pool())
-    .await?;
+    let album: Option<AlbumTokenRow> = ctx
+        .db
+        .query_opt(
+            "SELECT a.id, a.title, a.is_public, a.public_expires_at, u.name AS owner_name
+               FROM albums a LEFT JOIN users u ON u.id = a.owner_user_id
+              WHERE a.token = ?",
+            libsql::params![token],
+        )
+        .await?;
 
     let Some(mut album) = album else {
         reply(
@@ -1341,9 +1359,11 @@ async fn handle_album_view(ctx: &BotContext, token: &str, chat_id: i64) -> anyho
     };
 
     if album.is_public != 0 && album.public_expires_at.is_some_and(|e| e <= now()) {
-        sqlx::query("UPDATE albums SET is_public = 0 WHERE id = ?")
-            .bind(album.id)
-            .execute(ctx.db.pool())
+        ctx.db
+            .execute(
+                "UPDATE albums SET is_public = 0 WHERE id = ?",
+                libsql::params![album.id],
+            )
             .await?;
         album.is_public = 0;
     }
@@ -1376,9 +1396,11 @@ async fn handle_album_view(ctx: &BotContext, token: &str, chat_id: i64) -> anyho
     let items: Vec<AlbumItem> = rows.into_iter().take(50).collect();
 
     let dead = dead_item_count(&ctx.db, album.id).await?;
-    sqlx::query("UPDATE albums SET views = views + 1 WHERE id = ?")
-        .bind(album.id)
-        .execute(ctx.db.pool())
+    ctx.db
+        .execute(
+            "UPDATE albums SET views = views + 1 WHERE id = ?",
+            libsql::params![album.id],
+        )
         .await?;
     let site = site_name(&ctx.db).await?;
     reply(
@@ -1477,31 +1499,33 @@ struct InsertArgs {
 /// `insertAndConfirm` — index the media row, audit, and confirm in chat.
 async fn insert_and_confirm(ctx: &BotContext, a: InsertArgs) -> anyhow::Result<()> {
     let slug = random_slug();
-    sqlx::query(
-        "INSERT INTO media
-           (slug, owner_user_id, telegram_id, kind, file_id, file_unique_id, thumb_file_id,
-            file_size, width, height, duration, mime, caption, shares_count, availability, created_at, album_id, media_group_id)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
-    )
-    .bind(&slug)
-    .bind(a.owner_id)
-    .bind(&a.tg_id)
-    .bind(a.kind)
-    .bind(&a.file_id)
-    .bind(&a.file_unique_id)
-    .bind(&a.thumb_file_id)
-    .bind(a.file_size)
-    .bind(a.width)
-    .bind(a.height)
-    .bind(a.duration)
-    .bind(&a.mime)
-    .bind(&a.caption)
-    .bind(a.availability)
-    .bind(now())
-    .bind(a.album_id)
-    .bind(&a.media_group_id)
-    .execute(ctx.db.pool())
-    .await?;
+    ctx.db
+        .execute(
+            "INSERT INTO media
+               (slug, owner_user_id, telegram_id, kind, file_id, file_unique_id, thumb_file_id,
+                file_size, width, height, duration, mime, caption, shares_count, availability, created_at, album_id, media_group_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)",
+            libsql::params![
+                slug.as_str(),
+                a.owner_id,
+                a.tg_id.as_str(),
+                a.kind,
+                a.file_id.as_str(),
+                a.file_unique_id.as_deref(),
+                a.thumb_file_id.as_deref(),
+                a.file_size,
+                a.width,
+                a.height,
+                a.duration,
+                a.mime.as_deref(),
+                a.caption.as_deref(),
+                a.availability,
+                now(),
+                a.album_id,
+                a.media_group_id.as_deref()
+            ],
+        )
+        .await?;
     audit(
         &ctx.cache,
         Some(a.owner_id),
@@ -1612,12 +1636,13 @@ async fn handle_incoming_media(
     if let Some(state) = get_bot_state(&ctx.db, &tg_id).await? {
         if state.action == "album_upload" {
             if let Some(id) = state.album_id {
-                let alb: Option<TitleRow> =
-                    sqlx::query_as("SELECT title FROM albums WHERE id = ? AND owner_user_id = ?")
-                        .bind(id)
-                        .bind(owner)
-                        .fetch_optional(ctx.db.pool())
-                        .await?;
+                let alb: Option<TitleRow> = ctx
+                    .db
+                    .query_opt(
+                        "SELECT title FROM albums WHERE id = ? AND owner_user_id = ?",
+                        libsql::params![id, owner],
+                    )
+                    .await?;
                 if let Some(a) = alb {
                     album_id = Some(id);
                     album_title = Some(a.title);
@@ -1637,16 +1662,16 @@ async fn handle_incoming_media(
         && can(&ctx.db, owner, "album:create", None).await?
     {
         let group_id = msg.media_group_id.as_deref().unwrap_or("");
-        let hit: Option<GroupHitRow> = sqlx::query_as(
-            "SELECT m.album_id, a.title
-               FROM media m JOIN albums a ON a.id = m.album_id
-              WHERE m.media_group_id = ? AND m.owner_user_id = ?
-              LIMIT 1",
-        )
-        .bind(group_id)
-        .bind(owner)
-        .fetch_optional(ctx.db.pool())
-        .await?;
+        let hit: Option<GroupHitRow> = ctx
+            .db
+            .query_opt(
+                "SELECT m.album_id, a.title
+                   FROM media m JOIN albums a ON a.id = m.album_id
+                  WHERE m.media_group_id = ? AND m.owner_user_id = ?
+                  LIMIT 1",
+                libsql::params![group_id, owner],
+            )
+            .await?;
         if let Some(h) = hit {
             album_id = Some(h.album_id);
             let mut title = h.title;
@@ -1659,10 +1684,11 @@ async fn handle_incoming_media(
             {
                 if title.starts_with("Telegram drop ") {
                     title = cap.chars().take(200).collect();
-                    sqlx::query("UPDATE albums SET title = ? WHERE id = ?")
-                        .bind(&title)
-                        .bind(h.album_id)
-                        .execute(ctx.db.pool())
+                    ctx.db
+                        .execute(
+                            "UPDATE albums SET title = ? WHERE id = ?",
+                            libsql::params![title.as_str(), h.album_id],
+                        )
                         .await?;
                 }
             }
@@ -1898,9 +1924,8 @@ async fn process_inner(ctx: &BotContext, update: TgUpdate) -> anyhow::Result<()>
             }
             let title: Option<String> = match st.album_id {
                 Some(id) => {
-                    sqlx::query_scalar::<_, String>("SELECT title FROM albums WHERE id = ?")
-                        .bind(id)
-                        .fetch_optional(ctx.db.pool())
+                    ctx.db
+                        .scalar_opt("SELECT title FROM albums WHERE id = ?", libsql::params![id])
                         .await?
                 }
                 None => None,
@@ -1983,16 +2008,17 @@ async fn process_inner(ctx: &BotContext, update: TgUpdate) -> anyhow::Result<()>
                 .await;
                 return Ok(());
             };
-            let row: StatsRow = sqlx::query_as(
-                "SELECT
-                   COALESCE(SUM(CASE WHEN kind = 'photo' THEN 1 ELSE 0 END), 0) AS photos,
-                   COALESCE(SUM(CASE WHEN kind = 'video' THEN 1 ELSE 0 END), 0) AS videos,
-                   COALESCE(SUM(file_size), 0) AS bytes
-                 FROM media WHERE owner_user_id = ?",
-            )
-            .bind(o)
-            .fetch_one(ctx.db.pool())
-            .await?;
+            let row: StatsRow = ctx
+                .db
+                .query_one(
+                    "SELECT
+                       COALESCE(SUM(CASE WHEN kind = 'photo' THEN 1 ELSE 0 END), 0) AS photos,
+                       COALESCE(SUM(CASE WHEN kind = 'video' THEN 1 ELSE 0 END), 0) AS videos,
+                       COALESCE(SUM(file_size), 0) AS bytes
+                     FROM media WHERE owner_user_id = ?",
+                    libsql::params![o],
+                )
+                .await?;
             reply(
                 ctx,
                 chat_id,
@@ -2177,9 +2203,12 @@ pub async fn deliver_share(
         Err(e) => {
             if let Some(id) = media.id {
                 if is_dead_file_error(&e) {
-                    let _ = sqlx::query("UPDATE media SET missing = 1 WHERE id = ?")
-                        .bind(id)
-                        .execute(ctx.db.pool())
+                    let _ = ctx
+                        .db
+                        .execute(
+                            "UPDATE media SET missing = 1 WHERE id = ?",
+                            libsql::params![id],
+                        )
                         .await;
                 }
             }

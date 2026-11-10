@@ -23,7 +23,7 @@ async fn main() -> anyhow::Result<()> {
         .clone()
         .ok_or_else(|| anyhow::anyhow!("BOT_TOKEN is required for the bot poller"))?;
 
-    let db = Db::connect(&config.database_url).await?;
+    let db = Db::connect_from(&config).await?;
     db.migrate().await?;
 
     let ctx = BotContext {
