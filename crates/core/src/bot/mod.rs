@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::audit::audit;
 use crate::db::{Db, PUBLIC_LINK_TTL, now};
-use crate::media::FsCache;
+use crate::media::CacheBackend;
 use crate::rbac::can;
 use crate::settings::{DEFAULT_SITE_NAME, remember_bot_username, site_name, stored_bot_username};
 use crate::telegram::{
@@ -67,7 +67,7 @@ pub struct BotContext {
     pub db: Db,
     pub tg: TgClient,
     pub app_url: String,
-    pub cache: FsCache,
+    pub cache: CacheBackend,
 }
 
 const HELP: &str = "Send me photos or videos and I'll store them so you can manage and share them from the web app.\n\nTap-friendly — no need to type commands:\n/albums - open your album menu (view, share, add photos — all buttons)\n/newalbum TITLE - create an album (or just /newalbum and reply with a title)\n\nPower commands:\n/upload N|TITLE - file next sends into an album\n/view N · /share N · /unshare N - act on album N from /albums\n/done - finish uploading / cancel input\n\nTip: select several photos at once and they become a private album automatically — the group's caption becomes its name, and you'll get buttons to manage it.\n\n/start CODE - accept a friend invite\n/link CODE - attach this chat to your web account\n/add CODE - become a friend of someone (one-time code)\n/stats - how much you have stored\n/help - this message";

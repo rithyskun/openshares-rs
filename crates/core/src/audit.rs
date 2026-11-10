@@ -1,7 +1,8 @@
 //! Append-only audit trail — port of `src/lib/audit.ts`.
 //!
 //! Events are JSONL lines in monthly shards `audit/YYYY-MM.jsonl` inside
-//! the media cache (R2 in the TS app; `FsCache` here — same key space, so
+//! the media cache (R2/`S3Cache` in prod; `FsCache` locally — same key
+//! space, so
 //! a future object-store backend slots in without touching callers).
 //! `audit()` is best-effort: it logs and swallows failures, matching the
 //! TS contract that a logging failure can't break the audited action.
@@ -15,7 +16,7 @@ use tokio::io::{AsyncReadExt, AsyncSeekExt};
 
 use crate::db::Db;
 use crate::error::Result;
-use crate::media::FsCache;
+use crate::media::CacheBackend;
 use crate::util::audit_shard_key;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -31,7 +32,7 @@ struct AuditEntry {
 
 /// `audit(actor, action, targetType?, targetId?, detail?)` — never fails.
 pub async fn audit(
-    cache: &FsCache,
+    cache: &CacheBackend,
     actor_user_id: Option<i64>,
     action: &str,
     target_type: Option<&str>,
@@ -44,7 +45,7 @@ pub async fn audit(
 }
 
 async fn append(
-    cache: &FsCache,
+    cache: &CacheBackend,
     actor_user_id: Option<i64>,
     action: &str,
     target_type: Option<&str>,
@@ -108,7 +109,7 @@ pub struct AuditRow {
 /// event. Each shard is tail-read through the last [`TAIL_BYTES`]
 /// window (`cacheHead` + ranged `cacheGet` in the TS original; the
 /// `FsCache::open` seek here).
-pub async fn audit_entries(db: &Db, cache: &FsCache, limit: usize) -> Result<Vec<AuditRow>> {
+pub async fn audit_entries(db: &Db, cache: &CacheBackend, limit: usize) -> Result<Vec<AuditRow>> {
     let mut entries: Vec<AuditEntry> = Vec::new();
     let (base_y, base_m, _) = civil_from_days(crate::db::now().div_euclid(86_400));
 
@@ -127,10 +128,10 @@ pub async fn audit_entries(db: &Db, cache: &FsCache, limit: usize) -> Result<Vec
         let Some(mut object) = cache.open(&key).await? else {
             continue;
         };
-        object.file.seek(std::io::SeekFrom::Start(start)).await?;
+        object.stream.seek(std::io::SeekFrom::Start(start)).await?;
         let mut buf = Vec::new();
         object
-            .file
+            .stream
             .take(head.size - start)
             .read_to_end(&mut buf)
             .await?;
@@ -245,6 +246,7 @@ fn days_from_civil(y: i64, m: u32, d: u32) -> i64 {
 mod tests {
     use super::*;
     use crate::db::now;
+    use crate::media::FsCache;
 
     async fn test_db() -> (Db, tempfile::TempDir) {
         let dir = tempfile::tempdir().unwrap();
@@ -291,7 +293,7 @@ mod tests {
     async fn audit_entries_reads_newest_first_with_actor_names() {
         let (db, _d) = test_db().await;
         let dir = tempfile::tempdir().unwrap();
-        let cache = FsCache::new(dir.path());
+        let cache = CacheBackend::Fs(FsCache::new(dir.path()));
         db.execute(
             "INSERT INTO users (email, name, created_at, updated_at)
              VALUES ('a@x.co', 'Ann', 1, 1)",
@@ -338,7 +340,7 @@ mod tests {
     async fn audit_entries_ignores_old_shards_and_empty_cache() {
         let (db, _d) = test_db().await;
         let dir = tempfile::tempdir().unwrap();
-        let cache = FsCache::new(dir.path());
+        let cache = CacheBackend::Fs(FsCache::new(dir.path()));
 
         // A shard older than MAX_SHARDS_BACK months is never read.
         let old_key = audit_shard_key(month_start_unix(2000, 1, 0));

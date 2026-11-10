@@ -1,19 +1,26 @@
 //! Blob cache + media streaming — port of `src/lib/storage.ts` and the
 //! streaming logic behind `src/app/api/media/**`.
 //!
-//! Phase 2 scope: `FsCache` — the filesystem half of `storage.ts`
-//! (`cacheHead`/`cachePut` with `.meta.json` mime sidecars) — enough for
-//! `telegram::ensure_cached`. Phase 4 adds ranged `get`, the TTL sweep
-//! (`cache-cleanup.ts`), and Telegram-CDN tee-to-cache streaming.
+//! `CacheBackend` selects the storage half of `storage.ts`:
+//! `FsCache` is the `data/cache/` filesystem fallback (local dev, bot
+//! scripts); `S3Cache` is the `MEDIA_CACHE` R2 bucket in-app. Both expose
+//! the same `head`/`put`/`read`/`open`/`begin_put`/`sweep` surface so
+//! call sites never branch on backend.
+
+mod s3;
 
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::time::{Duration, SystemTime};
 
 use sha1::{Digest, Sha1};
 use std::fmt::Write as _;
-use tokio::io::AsyncWriteExt;
+use tokio::io::{AsyncRead, AsyncSeek, AsyncWriteExt};
 
+use crate::config::Config;
 use crate::error::{AppError, Result};
+
+pub use s3::S3Cache;
 
 /// Cache object key — mirrors `cacheKey(fileId, ext)` in storage.ts:
 /// `sha1(file_id)` hex + extension, so a cached copy is found by
@@ -41,7 +48,7 @@ pub struct CacheHead {
 /// Filesystem media cache — the `data/cache/` half of `storage.ts`.
 /// Keys are `sha1(file_id)+ext` (safe charset); path separators and `..`
 /// are rejected defensively before touching the filesystem.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FsCache {
     root: PathBuf,
 }
@@ -55,9 +62,7 @@ impl FsCache {
     /// `audit/` prefix); `..`, `\` and absolute paths are rejected so a
     /// key can never escape the cache root.
     fn path(&self, key: &str) -> Result<PathBuf> {
-        if key.is_empty() || key.contains("..") || key.contains('\\') || key.starts_with('/') {
-            return Err(AppError::Internal(format!("unsafe cache key: {key:?}")));
-        }
+        validate_key(key)?;
         Ok(self.root.join(key))
     }
 
@@ -123,7 +128,7 @@ impl FsCache {
         };
         let file = tokio::fs::File::open(self.path(key)?).await?;
         Ok(Some(CacheObject {
-            file,
+            stream: Box::pin(file),
             size: head.size,
             mime: head.mime,
         }))
@@ -140,10 +145,12 @@ impl FsCache {
         }
         let file = tokio::fs::File::create(&part_path).await?;
         Ok(CacheWriter {
-            file,
-            part_path,
-            final_path: self.path(key)?,
-            sidecar_path: self.sidecar(key)?,
+            inner: CacheWriterInner::Fs {
+                file,
+                part_path,
+                final_path: self.path(key)?,
+                sidecar_path: self.sidecar(key)?,
+            },
             bytes: 0,
         })
     }
@@ -207,23 +214,64 @@ impl FsCache {
     }
 }
 
+/// Shared key guard for every backend — R2-style keys may contain `/`
+/// (the `audit/` prefix); `..`, `\` and absolute paths are rejected.
+pub(crate) fn validate_key(key: &str) -> Result<()> {
+    if key.is_empty() || key.contains("..") || key.contains('\\') || key.starts_with('/') {
+        return Err(AppError::Internal(format!("unsafe cache key: {key:?}")));
+    }
+    Ok(())
+}
+
+/// Object-safe seek+read bound — a trait object can't name two principal
+/// traits (`dyn AsyncRead + AsyncSeek` is E0225), so callers get this
+/// single trait covering both. Blanket-implemented for every
+/// `AsyncRead + AsyncSeek` type (fs `File`, `Cursor<Vec<u8>>`, ...).
+pub trait AsyncReadSeek: AsyncRead + AsyncSeek {}
+impl<T: AsyncRead + AsyncSeek + ?Sized> AsyncReadSeek for T {}
+
 /// An open cached object — seek + `take()` for Range, stream for 200.
+/// `stream` is a filesystem `File` on `FsCache` and an in-memory
+/// `Cursor` on `S3Cache` (objects are Bot-API-capped ~20 MB).
 pub struct CacheObject {
-    pub file: tokio::fs::File,
+    pub stream: Pin<Box<dyn AsyncReadSeek + Send>>,
     pub size: u64,
     pub mime: Option<String>,
 }
 
-/// Streaming write handle from [`FsCache::begin_put`].
+/// Streaming write handle from `begin_put` — fs writes land in a `.part`
+/// file renamed on `finish`; object-store writes buffer and PUT once.
 pub struct CacheWriter {
-    file: tokio::fs::File,
-    part_path: PathBuf,
-    final_path: PathBuf,
-    sidecar_path: PathBuf,
+    inner: CacheWriterInner,
     bytes: u64,
 }
 
+enum CacheWriterInner {
+    Fs {
+        file: tokio::fs::File,
+        part_path: PathBuf,
+        final_path: PathBuf,
+        sidecar_path: PathBuf,
+    },
+    S3 {
+        cache: S3Cache,
+        key: String,
+        buf: Vec<u8>,
+    },
+}
+
 impl CacheWriter {
+    pub(crate) fn for_s3(cache: S3Cache, key: String) -> Self {
+        Self {
+            inner: CacheWriterInner::S3 {
+                cache,
+                key,
+                buf: Vec::new(),
+            },
+            bytes: 0,
+        }
+    }
+
     /// Bytes written so far — for logging/telemetry.
     pub fn bytes_written(&self) -> u64 {
         self.bytes
@@ -231,27 +279,114 @@ impl CacheWriter {
 
     /// Append a chunk (from the upstream stream).
     pub async fn write_chunk(&mut self, chunk: &[u8]) -> Result<()> {
-        self.file.write_all(chunk).await?;
+        match &mut self.inner {
+            CacheWriterInner::Fs { file, .. } => file.write_all(chunk).await?,
+            CacheWriterInner::S3 { buf, .. } => buf.extend_from_slice(chunk),
+        }
         self.bytes += chunk.len() as u64;
         Ok(())
     }
 
-    /// Flush + rename `.part` → final key + write the mime sidecar.
+    /// Commit the object — fs: flush + rename `.part` → final + mime
+    /// sidecar; s3: one PUT with the `Content-Type` attribute.
     /// Returns total bytes committed.
-    pub async fn finish(mut self, mime: Option<&str>) -> Result<u64> {
-        self.file.flush().await?;
-        drop(self.file);
-        tokio::fs::rename(&self.part_path, &self.final_path).await?;
-        if let Some(mime) = mime {
-            let sidecar = serde_json::json!({ "mime": mime }).to_string();
-            tokio::fs::write(&self.sidecar_path, sidecar).await?;
+    pub async fn finish(self, mime: Option<&str>) -> Result<u64> {
+        let bytes = self.bytes;
+        match self.inner {
+            CacheWriterInner::Fs {
+                mut file,
+                part_path,
+                final_path,
+                sidecar_path,
+            } => {
+                file.flush().await?;
+                drop(file);
+                tokio::fs::rename(&part_path, &final_path).await?;
+                if let Some(mime) = mime {
+                    let sidecar = serde_json::json!({ "mime": mime }).to_string();
+                    tokio::fs::write(&sidecar_path, sidecar).await?;
+                }
+            }
+            CacheWriterInner::S3 { cache, key, buf } => {
+                cache.put(&key, &buf, mime).await?;
+            }
         }
-        Ok(self.bytes)
+        Ok(bytes)
     }
 
-    /// Abandon the write — removes the `.part` file.
+    /// Abandon the write — fs removes the `.part` file; s3 drops the
+    /// buffer (nothing was ever visible).
     pub async fn abort(self) {
-        let _ = tokio::fs::remove_file(&self.part_path).await;
+        if let CacheWriterInner::Fs { part_path, .. } = self.inner {
+            let _ = tokio::fs::remove_file(&part_path).await;
+        }
+    }
+}
+
+/// Cache backend selected by `MEDIA_CACHE_BACKEND` — the two halves of
+/// `storage.ts`: `fs` (`data/cache/`, local dev + bot scripts) and `s3`
+/// (the `MEDIA_CACHE` R2 bucket). Call sites hold this enum and never
+/// branch on backend.
+#[derive(Clone, Debug)]
+pub enum CacheBackend {
+    Fs(FsCache),
+    S3(S3Cache),
+}
+
+impl CacheBackend {
+    /// Pick the backend from `MEDIA_CACHE_BACKEND` (`fs` default, `s3`/`r2`
+    /// for object storage). `s3` fails fast when `R2_*` config is
+    /// incomplete — see `S3Cache::from_config`.
+    pub fn from_config(config: &Config) -> Result<Self> {
+        match config.media_cache_backend.as_str() {
+            "s3" | "r2" => Ok(Self::S3(S3Cache::from_config(config)?)),
+            "fs" | "" => Ok(Self::Fs(FsCache::new(&config.media_cache_dir))),
+            other => Err(AppError::Config(format!(
+                "unknown MEDIA_CACHE_BACKEND {other:?} (expected \"fs\" or \"s3\")"
+            ))),
+        }
+    }
+
+    pub async fn head(&self, key: &str) -> Result<Option<CacheHead>> {
+        match self {
+            Self::Fs(c) => c.head(key).await,
+            Self::S3(c) => c.head(key).await,
+        }
+    }
+
+    pub async fn put(&self, key: &str, data: &[u8], mime: Option<&str>) -> Result<()> {
+        match self {
+            Self::Fs(c) => c.put(key, data, mime).await,
+            Self::S3(c) => c.put(key, data, mime).await,
+        }
+    }
+
+    pub async fn read(&self, key: &str) -> Result<Option<Vec<u8>>> {
+        match self {
+            Self::Fs(c) => c.read(key).await,
+            Self::S3(c) => c.read(key).await,
+        }
+    }
+
+    pub async fn open(&self, key: &str) -> Result<Option<CacheObject>> {
+        match self {
+            Self::Fs(c) => c.open(key).await,
+            Self::S3(c) => c.open(key).await,
+        }
+    }
+
+    pub async fn begin_put(&self, key: &str) -> Result<CacheWriter> {
+        match self {
+            Self::Fs(c) => c.begin_put(key).await,
+            Self::S3(c) => c.begin_put(key).await,
+        }
+    }
+
+    pub async fn sweep(&self, max_age: Duration) -> Result<(u64, u64)> {
+        match self {
+            Self::Fs(c) => c.sweep(max_age).await,
+            Self::S3(c) => c.sweep(max_age).await,
+        }
     }
 }
 

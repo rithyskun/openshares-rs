@@ -260,7 +260,7 @@ pub(crate) mod tests {
     use openshares_core::crypto::password::{get_session_user_by_token, hash_password};
     use openshares_core::db::Db;
     use openshares_core::db::repos::users::NewUser;
-    use openshares_core::media::FsCache;
+    use openshares_core::media::{CacheBackend, FsCache};
     use std::sync::Arc;
     use tower::ServiceExt;
 
@@ -394,7 +394,7 @@ NwIDAQAB\n\
         db.migrate().await.unwrap();
         AppState {
             db,
-            cache: FsCache::new(dir.path().join("cache")),
+            cache: CacheBackend::Fs(FsCache::new(dir.path().join("cache"))),
             config: Config {
                 bot_token: None,
                 app_url: "http://localhost:8080".to_string(),
@@ -402,6 +402,12 @@ NwIDAQAB\n\
                 turso_db_url: None,
                 turso_auth_token: None,
                 media_cache_dir: dir.path().join("cache").display().to_string(),
+                media_cache_backend: "fs".to_string(),
+                r2_account_id: None,
+                r2_access_key_id: None,
+                r2_secret_access_key: None,
+                r2_bucket: None,
+                r2_endpoint: None,
                 cache_ttl_days: 7,
                 port: 0,
                 web_origin: None,

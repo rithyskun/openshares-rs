@@ -18,7 +18,7 @@ use reqwest::multipart::{Form, Part};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 
-use crate::media::{FsCache, cache_key};
+use crate::media::{CacheBackend, cache_key};
 
 /// `tgCall` JSON timeout — mirrors `AbortSignal.timeout(60_000)`.
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
@@ -487,7 +487,7 @@ impl TgClient {
     /// downloading from Telegram once. Bot API caps downloads at ~20 MB
     /// so buffering the body is safe (same reasoning as telegram.ts).
     /// Returns `None` on any failure — callers treat it as a soft miss.
-    pub async fn ensure_cached(&self, file_id: &str, cache: &FsCache) -> Option<FileMeta> {
+    pub async fn ensure_cached(&self, file_id: &str, cache: &CacheBackend) -> Option<FileMeta> {
         let loc = match self.locate_telegram_file(file_id).await {
             Ok(loc) => loc,
             Err(err) => {

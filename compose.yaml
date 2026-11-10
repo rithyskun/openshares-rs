@@ -16,7 +16,13 @@ services:
       DATABASE_URL: ${DATABASE_URL:-sqlite://data/openshares.db}
       TURSO_DB_URL: ${TURSO_DB_URL:-}
       TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN:-}
+      MEDIA_CACHE_BACKEND: ${MEDIA_CACHE_BACKEND:-fs}
       MEDIA_CACHE_DIR: ${MEDIA_CACHE_DIR:-./data/cache}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_BUCKET: ${R2_BUCKET:-}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
       RUST_LOG: ${RUST_LOG:-info}
     restart: unless-stopped
 
@@ -34,7 +40,13 @@ services:
       DATABASE_URL: ${DATABASE_URL:-sqlite://data/openshares.db}
       TURSO_DB_URL: ${TURSO_DB_URL:-}
       TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN:-}
+      MEDIA_CACHE_BACKEND: ${MEDIA_CACHE_BACKEND:-fs}
       MEDIA_CACHE_DIR: ${MEDIA_CACHE_DIR:-./data/cache}
+      R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
+      R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
+      R2_SECRET_ACCESS_KEY: ${R2_SECRET_ACCESS_KEY:-}
+      R2_BUCKET: ${R2_BUCKET:-}
+      R2_ENDPOINT: ${R2_ENDPOINT:-}
       RUST_LOG: ${RUST_LOG:-info}
       BOT_TOKEN: ${BOT_TOKEN:-}
     restart: unless-stopped

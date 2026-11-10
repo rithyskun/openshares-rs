@@ -6,7 +6,7 @@
 use openshares_core::bot::{self, BotContext};
 use openshares_core::config::Config;
 use openshares_core::db::Db;
-use openshares_core::media::FsCache;
+use openshares_core::media::CacheBackend;
 use openshares_core::telegram::TgClient;
 use std::time::Duration;
 use tracing_subscriber::EnvFilter;
@@ -30,7 +30,7 @@ async fn main() -> anyhow::Result<()> {
         db,
         tg: TgClient::new(token),
         app_url: config.app_url.clone(),
-        cache: FsCache::new(config.media_cache_dir.clone()),
+        cache: CacheBackend::from_config(&config)?,
     };
 
     // Smoke test — proves token + connectivity before polling.

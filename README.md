@@ -112,6 +112,14 @@ docker run --rm -v "$PWD:/app" \
 - DB backend: `TURSO_DB_URL`+`TURSO_AUTH_TOKEN` → remote Turso (the same
   DB the TS app uses); unset → local SQLite file at `DATABASE_URL`. Migrations
   are tracked in `schema_migrations`, the same table `setup-db.ts` wrote.
+- Media/audit cache backend: `MEDIA_CACHE_BACKEND=s3` (+ `R2_ACCOUNT_ID`,
+  `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`; `R2_ENDPOINT`
+  optional override) → Cloudflare R2, the `MEDIA_CACHE` binding
+  counterpart. Default `fs` → `MEDIA_CACHE_DIR` on disk for local dev and
+  bot scripts. MIME rides on the object's `Content-Type` attribute (R2
+  `httpMetadata.contentType`), no `.meta.json` sidecars in object storage;
+  `S3Cache::head` reports size only (S3 HEAD can't surface attributes
+  through `object_store`) — `open()` is the mime-bearing path.
 - `reqwest` has no IPv4-first DNS knob — the TS `telegram.ts` hack for
   broken-IPv6 networks has no direct equivalent (hosts-file workaround).
 
@@ -123,9 +131,11 @@ docker run --rm -v "$PWD:/app" \
   API DTOs live in `server` routes — never leak rows to HTTP.
 - `tracing` for all logging; `unwrap`/`expect` outside tests are lint-denied.
 - CPU-bound crypto goes through `tokio::task::spawn_blocking`.
-- Media responses stream (`Body::from_stream`) — never buffer whole files.
-- One `reqwest::Client` + one `libsql::Connection` (`Db`) in `AppState`,
-  never per-request.
+- Media responses stream (`Body::from_stream`) — never buffer whole files
+  at the HTTP layer (object-store `open` is an in-memory `Cursor`, bounded
+  by the ~20 MB Bot-API cap).
+- One `reqwest::Client` + one `Db` (Turso-pooled) + one `CacheBackend`
+  in `AppState`, never per-request.
 
 ## Deploy
 

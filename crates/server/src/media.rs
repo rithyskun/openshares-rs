@@ -2,7 +2,7 @@
 //! `src/app/api/media/[id]/route.ts` (the GET handler, L86-190).
 //!
 //! `serve_media` resolves a `file_id` to bytes: a cache hit streams from
-//! `FsCache` with HTTP Range support (`206`), a miss opens the Telegram
+//! `CacheBackend` with HTTP Range support (`206`), a miss opens the Telegram
 //! CDN stream via `TgClient::open_telegram_file` and tees it through
 //! `CacheWriter` so the object lands in cache for next time.
 //! Responses MUST stream (`Body::from_stream`) — never buffer whole files.
@@ -20,7 +20,7 @@ use axum::http::StatusCode;
 use axum::http::header::{self, HeaderMap, HeaderName, HeaderValue};
 use axum::response::Response;
 use openshares_core::error::AppError;
-use openshares_core::media::{CacheObject, CacheWriter, FsCache, cache_key};
+use openshares_core::media::{CacheBackend, CacheObject, CacheWriter, cache_key};
 use openshares_core::telegram::{TelegramFile, TgClient, is_dead_file_error};
 use tokio::io::{AsyncReadExt, AsyncSeekExt, AsyncWriteExt, DuplexStream};
 use tokio_util::io::ReaderStream;
@@ -124,7 +124,7 @@ fn map_upstream_error(file_id: &str, err: &str) -> ApiError {
 /// Dispatch on the upstream response — the two cold paths in route.ts.
 fn serve_telegram(
     tg: &TgClient,
-    cache: &FsCache,
+    cache: &CacheBackend,
     file_id: &str,
     opened: TelegramFile,
     mime_hint: Option<&str>,
@@ -197,13 +197,13 @@ async fn serve_cached(
     if let Some(range) = range_header {
         return match resolve_range(range, size) {
             ResolvedRange::Satisfiable { start, end } => {
-                obj.file
+                obj.stream
                     .seek(SeekFrom::Start(start))
                     .await
                     .map_err(AppError::Io)
                     .map_err(ApiError::from)?;
                 let len = end - start + 1;
-                let body = Body::from_stream(ReaderStream::new(obj.file.take(len)));
+                let body = Body::from_stream(ReaderStream::new(obj.stream.take(len)));
 
                 let mut res = Response::new(body);
                 *res.status_mut() = StatusCode::PARTIAL_CONTENT;
@@ -229,7 +229,7 @@ async fn serve_cached(
         };
     }
 
-    let body = Body::from_stream(ReaderStream::new(obj.file));
+    let body = Body::from_stream(ReaderStream::new(obj.stream));
     let mut res = Response::new(body);
     *res.status_mut() = StatusCode::OK;
     put_headers(res.headers_mut(), &content_type, Some(size));
@@ -351,7 +351,7 @@ pub fn ext_from_mime(mime: &str) -> Option<&'static str> {
 /// Drop calls `close_read`/`close_write`: dropping the read end makes
 /// the pending `write_all` fail with `BrokenPipe` — the disconnect
 /// signal the abort logic depends on.
-fn tee_body(file: TelegramFile, cache: FsCache, mime: String) -> Body {
+fn tee_body(file: TelegramFile, cache: CacheBackend, mime: String) -> Body {
     let (reader, writer) = tokio::io::duplex(PUMP_BUF);
     tokio::spawn(tee_pump_telegram(file, writer, cache, mime));
     Body::from_stream(ReaderStream::new(reader))
@@ -373,7 +373,7 @@ fn tee_body(file: TelegramFile, cache: FsCache, mime: String) -> Body {
 async fn tee_pump_telegram(
     mut file: TelegramFile,
     mut client: DuplexStream,
-    cache: FsCache,
+    cache: CacheBackend,
     mime: String,
 ) {
     let key = file.key.clone();
@@ -399,7 +399,7 @@ async fn tee_pump_telegram(
 
 /// Open the `.part` writer — a cache-open failure only logs (the client
 /// still gets every byte; `cachePut` is best-effort in TS too).
-async fn open_writer(cache: &FsCache, key: &str) -> Option<PutGuard> {
+async fn open_writer(cache: &CacheBackend, key: &str) -> Option<PutGuard> {
     match cache.begin_put(key).await {
         Ok(w) => Some(PutGuard::new(w)),
         Err(err) => {
@@ -540,6 +540,7 @@ impl Drop for PutGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use openshares_core::media::FsCache;
     use std::collections::VecDeque;
     use std::pin::Pin;
     use std::task::{Context, Poll};
@@ -551,7 +552,7 @@ mod tests {
     async fn tee_pump<R>(
         mut upstream: R,
         mut client: DuplexStream,
-        cache: FsCache,
+        cache: CacheBackend,
         key: String,
         mime: String,
     ) where
@@ -657,7 +658,7 @@ mod tests {
     #[tokio::test]
     async fn tee_streams_to_client_and_commits_cache() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = FsCache::new(dir.path());
+        let cache = CacheBackend::Fs(FsCache::new(dir.path()));
         let data: Vec<u8> = (0..150_000u32).map(|i| (i % 251) as u8).collect();
 
         let (rd, wr) = tokio::io::duplex(1024); // small pipe → many pump passes
@@ -690,7 +691,7 @@ mod tests {
     #[tokio::test]
     async fn tee_aborts_part_file_on_client_disconnect() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = FsCache::new(dir.path());
+        let cache = CacheBackend::Fs(FsCache::new(dir.path()));
         let data = vec![7u8; 256 * 1024];
 
         let (mut rd, wr) = tokio::io::duplex(512);
@@ -740,7 +741,7 @@ mod tests {
     #[tokio::test]
     async fn tee_aborts_part_file_on_upstream_error() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = FsCache::new(dir.path());
+        let cache = CacheBackend::Fs(FsCache::new(dir.path()));
         let upstream = FlakyRead {
             chunks: VecDeque::from([
                 Ok(vec![1u8; 100]),
@@ -780,7 +781,7 @@ mod tests {
     #[tokio::test]
     async fn cached_range_request_is_206_with_content_range() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = FsCache::new(dir.path());
+        let cache = CacheBackend::Fs(FsCache::new(dir.path()));
         let data: Vec<u8> = (0..100u8).collect();
         cache.put("k.mp4", &data, Some("video/mp4")).await.unwrap();
         let obj = cache.open("k.mp4").await.unwrap().unwrap();
@@ -799,7 +800,7 @@ mod tests {
     #[tokio::test]
     async fn cached_full_request_is_200() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = FsCache::new(dir.path());
+        let cache = CacheBackend::Fs(FsCache::new(dir.path()));
         cache.put("k.jpg", b"pixels", None).await.unwrap();
         let obj = cache.open("k.jpg").await.unwrap().unwrap();
 
@@ -814,7 +815,7 @@ mod tests {
     #[tokio::test]
     async fn cached_bad_range_is_416() {
         let dir = tempfile::tempdir().unwrap();
-        let cache = FsCache::new(dir.path());
+        let cache = CacheBackend::Fs(FsCache::new(dir.path()));
         cache.put("k.bin", b"0123456789", None).await.unwrap();
         let obj = cache.open("k.bin").await.unwrap().unwrap();
 

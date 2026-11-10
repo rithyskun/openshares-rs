@@ -30,8 +30,30 @@ pub struct Config {
     /// config shape so `TURSO_DB_URL`-only local libsql-server setups work.
     pub turso_auth_token: Option<String>,
 
-    /// `MEDIA_CACHE_DIR` — filesystem media blob cache (default `./data/cache`).
+    /// `MEDIA_CACHE_DIR` — filesystem media blob cache root (default
+    /// `./data/cache`); used when `MEDIA_CACHE_BACKEND=fs`.
     pub media_cache_dir: String,
+
+    /// `MEDIA_CACHE_BACKEND` — `fs` (default) or `s3`/`r2` (S3-compatible
+    /// object storage — the `MEDIA_CACHE` R2 binding counterpart).
+    pub media_cache_backend: String,
+
+    /// `R2_ACCOUNT_ID` — Cloudflare account id; builds the default
+    /// `https://<account>.r2.cloudflarestorage.com` endpoint.
+    pub r2_account_id: Option<String>,
+
+    /// `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` — R2 API token pair
+    /// (S3 `AccessKeyId`/`SecretAccessKey`).
+    pub r2_access_key_id: Option<String>,
+    pub r2_secret_access_key: Option<String>,
+
+    /// `R2_BUCKET` — object-store bucket name (the TS `MEDIA_CACHE`
+    /// binding points at the `openshares-cache` bucket).
+    pub r2_bucket: Option<String>,
+
+    /// `R2_ENDPOINT` — optional S3 endpoint override (other
+    /// S3-compatible stores); defaults to the account's R2 endpoint.
+    pub r2_endpoint: Option<String>,
 
     /// `CACHE_TTL_DAYS` — cache sweep TTL seed (settings table overrides).
     pub cache_ttl_days: u32,
@@ -61,6 +83,12 @@ impl Config {
             turso_db_url: env("TURSO_DB_URL"),
             turso_auth_token: env("TURSO_AUTH_TOKEN"),
             media_cache_dir: env("MEDIA_CACHE_DIR").unwrap_or_else(|| "./data/cache".to_string()),
+            media_cache_backend: env("MEDIA_CACHE_BACKEND").unwrap_or_else(|| "fs".to_string()),
+            r2_account_id: env("R2_ACCOUNT_ID"),
+            r2_access_key_id: env("R2_ACCESS_KEY_ID"),
+            r2_secret_access_key: env("R2_SECRET_ACCESS_KEY"),
+            r2_bucket: env("R2_BUCKET"),
+            r2_endpoint: env("R2_ENDPOINT"),
             cache_ttl_days: env("CACHE_TTL_DAYS")
                 .and_then(|v| v.parse().ok())
                 .unwrap_or(7),
