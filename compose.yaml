@@ -1,0 +1,41 @@
+# Local deploy-test stack. `docker compose up -d` runs the API server;
+# `docker compose --profile bot up -d` adds the long-poll bot (needs BOT_TOKEN).
+services:
+  server:
+    build: .
+    ports:
+      - "8080:8080"
+    volumes:
+      - openshares-data:/app/data
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Compose-level defaults; real values come from .env when present.
+      APP_URL: ${APP_URL:-http://localhost:8080}
+      DATABASE_URL: ${DATABASE_URL:-sqlite://data/openshares.db}
+      MEDIA_CACHE_DIR: ${MEDIA_CACHE_DIR:-./data/cache}
+      RUST_LOG: ${RUST_LOG:-info}
+    restart: unless-stopped
+
+  bot:
+    build: .
+    command: ["openshares-bot"]
+    profiles: ["bot"]
+    volumes:
+      - openshares-data:/app/data
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      APP_URL: ${APP_URL:-http://localhost:8080}
+      DATABASE_URL: ${DATABASE_URL:-sqlite://data/openshares.db}
+      MEDIA_CACHE_DIR: ${MEDIA_CACHE_DIR:-./data/cache}
+      RUST_LOG: ${RUST_LOG:-info}
+      BOT_TOKEN: ${BOT_TOKEN:-}
+    restart: unless-stopped
+    depends_on:
+      - server
+
+volumes:
+  openshares-data:

@@ -1,0 +1,68 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+authors = ["Rithy Skun <rithy.skun@outlook.com>"]
+
+[workspace.dependencies]
+# Async runtime + web framework
+tokio = { version = "1", features = ["full"] }
+axum = "0.8"
+tower = "0.5"
+tower-http = { version = "0.6", features = ["trace"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+# Errors / logging / config
+thiserror = "2"
+anyhow = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+dotenvy = "0.15"
+
+# HTTP client (Telegram Bot API).
+# native-tls -> Schannel on Windows / OpenSSL on Linux: avoids the aws-lc-rs
+# C toolchain (cmake/nasm) that rustls would require on Windows.
+reqwest = { version = "0.12", default-features = false, features = [
+    "native-tls",
+    "json",
+    "stream",
+    "multipart",
+] }
+
+# Database — sqlx + SQLite. The schema is reused verbatim from
+# openshares-main/migrations (plain SQLite). A libsql/Turso client can be
+# swapped in later without touching repositories.
+sqlx = { version = "0.8", default-features = false, features = [
+    "runtime-tokio",
+    "sqlite",
+    "chrono",
+    "migrate",
+    "macros",
+] }
+
+# Media cache keys — sha1(file_id) + ext, same as storage.ts
+sha1 = "0.10"
+
+# Bot utils — newToken (base64url) + randomSlug
+rand = "0.9"
+base64 = "0.22"
+
+# Tests — temp cache dirs
+tempfile = "3"
+
+# Phase 6 crypto (added to crates/core as each module lands):
+# base64 = "0.22"
+# sha2 = "0.10"
+# hmac = "0.12"
+# aes-gcm = "0.10"
+# rsa = { version = "0.9", features = ["sha2"] }
+# scrypt = "0.11"
+# jsonwebtoken = "9"

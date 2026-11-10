@@ -1,0 +1,25 @@
+# Build artifacts — never send the 1.7GB target dir to the daemon
+target/
+
+# Runtime data (sqlite db, media cache, audit shards)
+data/
+
+# Secrets — env files must never enter image layers
+.env
+.env.*
+!.env.example
+
+# VCS / editor / OS noise
+.git/
+.gitignore
+.github/
+.idea/
+.vscode/
+*.iml
+.DS_Store
+Thumbs.db
+
+# Docs not needed at build time
+README.md
+AGENTS.md
+docs/
