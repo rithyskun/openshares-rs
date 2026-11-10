@@ -16,6 +16,7 @@ pub mod repos;
 
 use std::collections::HashSet;
 use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -33,6 +34,21 @@ pub const PUBLIC_LINK_TTL: i64 = 7 * 24 * 60 * 60;
 /// (NAT drop, edge GOAWAY) and would otherwise stall the request until
 /// TCP gives up. Local queries never approach it.
 const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Remote connection-pool width. libsql serializes every round trip
+/// through one `Mutex<RawStream>` per `Connection` — a single shared
+/// conn makes ALL concurrent requests queue behind each other's HTTP
+/// RTTs (an SSR page fanning out fetches pays the sum, not the max).
+/// Each slot is an independent hrana stream, so pool width is the real
+/// query parallelism. Local keeps a single slot.
+const REMOTE_POOL_SIZE: usize = 8;
+
+/// `(generation, conn)` slot — the conn is swappable because a remote
+/// hrana *stream* dies permanently when Turso reaps its HTTP conn:
+/// every later query 404s `stream not found` until `Database::connect()`
+/// mints a new `Connection`. The generation dedupes concurrent reconnects
+/// on the same slot.
+type ConnSlot = Arc<Mutex<(u64, Connection)>>;
 
 /// Read statements are idempotent — safe to replay on a fresh conn after
 /// a transport error. Writes (`INSERT .. RETURNING` included) are not:
@@ -106,17 +122,23 @@ pub fn now() -> i64 {
         .unwrap_or(0)
 }
 
-/// Shared database handle. Cheap to clone — wraps the libsql connection.
+/// Shared database handle. Cheap to clone — wraps the libsql pool.
 #[derive(Clone)]
 pub struct Db {
-    /// `(generation, conn)` — swappable because a remote hrana *stream*
-    /// dies permanently when Turso reaps its HTTP conn: every later query
-    /// 404s `stream not found` until `Database::connect()` mints a new
-    /// `Connection`. The generation dedupes concurrent reconnects.
-    conn: Arc<Mutex<(u64, Connection)>>,
+    /// Connection slots. The mutex guards only the `(rev, conn)` swap —
+    /// it is held for the `clone()` in [`Db::checkout`], never across a
+    /// query, so waiting on a slot costs ~ns while the slot's *internal*
+    /// stream mutex does the real serialization.
+    slots: Arc<[ConnSlot]>,
+    /// Round-robin checkout cursor — shared across `Db` clones.
+    cursor: Arc<AtomicUsize>,
     /// `Connection` does not keep the `Database` open on its own — hold
     /// it. Also the reconnect source.
     database: Arc<Database>,
+    /// Remote backend — drives the keepalive and gives `transaction()`
+    /// a dedicated conn (a pooled slot's shared stream would let other
+    /// statements join the tx's baton).
+    remote: bool,
 }
 
 impl Db {
@@ -145,8 +167,10 @@ impl Db {
             .await;
 
         Ok(Self {
-            conn: Arc::new(Mutex::new((0, conn))),
+            slots: Arc::from([Self::slot(conn)]),
+            cursor: Arc::new(AtomicUsize::new(0)),
             database: Arc::new(database),
+            remote: false,
         })
     }
 
@@ -154,25 +178,51 @@ impl Db {
     /// `https://`) + `TURSO_AUTH_TOKEN`. Mirrors `createClient({url,
     /// authToken})` in the TS `db/index.ts`.
     pub async fn connect_remote(url: &str, auth_token: &str) -> Result<Self> {
-        let database = Builder::new_remote(url.to_string(), auth_token.to_string())
-            .build()
-            .await?;
-        let conn = database.connect()?;
-        let _ = conn.execute_batch("PRAGMA foreign_keys = ON").await;
+        let database = Arc::new(
+            Builder::new_remote(url.to_string(), auth_token.to_string())
+                .build()
+                .await?,
+        );
+
+        // `connect()` is wire-free (the hrana stream materializes on first
+        // use); only the per-conn `PRAGMA` costs a round trip, so the slots
+        // are primed in parallel rather than paying N sequential RTTs.
+        let mut join = tokio::task::JoinSet::new();
+        for _ in 0..REMOTE_POOL_SIZE {
+            let database = database.clone();
+            join.spawn(async move {
+                let conn = database.connect()?;
+                let _ = conn.execute_batch("PRAGMA foreign_keys = ON").await;
+                Ok::<_, libsql::Error>(conn)
+            });
+        }
+        let mut slots = Vec::with_capacity(REMOTE_POOL_SIZE);
+        while let Some(res) = join.join_next().await {
+            let conn = res.map_err(|_| AppError::Internal("db pool task panicked".into()))??;
+            slots.push(Self::slot(conn));
+        }
 
         let db = Self {
-            conn: Arc::new(Mutex::new((0, conn))),
-            database: Arc::new(database),
+            slots: Arc::from(slots),
+            cursor: Arc::new(AtomicUsize::new(0)),
+            database,
+            remote: true,
         };
 
         // Turso's edge reaps idle HTTP connections, and a dead pooled conn
-        // parks or fails the next remote query. A cheap ping keeps it warm;
-        // failures are ignored — the pool reconnects on next use.
+        // parks or fails the next remote query. A cheap ping per slot keeps
+        // every stream warm — and going through `scalar` (`q`) self-heals
+        // dead streams proactively instead of a request paying the
+        // reconnect.
         let ping = db.clone();
+        let width = db.slots.len();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(20)).await;
-                let _ = ping.scalar::<i64>("SELECT 1", ()).await;
+                // round-robin checkout spreads these across all slots.
+                for _ in 0..width {
+                    let _ = ping.scalar::<i64>("SELECT 1", ()).await;
+                }
             }
         });
 
@@ -252,19 +302,30 @@ impl Db {
 
     /* ------------------- query helpers (sqlx verbs) ------------------- */
 
-    /// Snapshot of the shared conn handle + its generation.
-    fn conn_handle(&self) -> (u64, Connection) {
-        let g = self.conn.lock().unwrap_or_else(|e| e.into_inner());
-        (g.0, g.1.clone())
+    fn slot(conn: Connection) -> ConnSlot {
+        Arc::new(Mutex::new((0, conn)))
     }
 
-    /// Swap in a fresh `Connection` — the only cure for a dead hrana
-    /// stream. If another task already reconnected (`rev` moved on), take
-    /// their conn instead of dialing a second one.
-    fn reconnect(&self, rev: u64) -> Result<(u64, Connection)> {
-        let mut g = self.conn.lock().unwrap_or_else(|e| e.into_inner());
+    /// Round-robin slot checkout — returns the slot handle, its current
+    /// generation and a cloned `Connection` (the clone shares the slot's
+    /// internal stream, so parallel queries spread across *slots*).
+    fn checkout(&self) -> (ConnSlot, u64, Connection) {
+        let idx = self.cursor.fetch_add(1, Ordering::Relaxed) % self.slots.len();
+        let slot = self.slots[idx].clone();
+        let (rev, conn) = {
+            let g = slot.lock().unwrap_or_else(|e| e.into_inner());
+            (g.0, g.1.clone())
+        };
+        (slot, rev, conn)
+    }
+
+    /// Swap a slot's `Connection` for a fresh one — the only cure for a
+    /// dead hrana stream. If another task already reconnected this slot
+    /// (`rev` moved on), take their conn instead of dialing a second one.
+    fn reconnect(database: &Database, slot: &ConnSlot, rev: u64) -> Result<(u64, Connection)> {
+        let mut g = slot.lock().unwrap_or_else(|e| e.into_inner());
         if g.0 == rev {
-            g.1 = self.database.connect()?;
+            g.1 = database.connect()?;
             g.0 += 1;
         }
         Ok((g.0, g.1.clone()))
@@ -285,13 +346,13 @@ impl Db {
     /// `conn.query` is the only network boundary; `Rows::next()` decodes.
     async fn q(&self, sql: &str, params: libsql::params::Params) -> Result<libsql::Rows> {
         let read = is_read(sql);
-        let (mut rev, mut conn) = self.conn_handle();
+        let (slot, mut rev, mut conn) = self.checkout();
         for _ in 0..3 {
             match timeout(QUERY_TIMEOUT, conn.query(sql, params.clone())).await {
                 Ok(Ok(rows)) => return Ok(rows),
                 Ok(Err(e)) if is_stream_dead(&e) => {
                     tracing::warn!(error = %e, "db: remote stream lost, reconnecting");
-                    (rev, conn) = self.reconnect(rev)?;
+                    (rev, conn) = Self::reconnect(&self.database, &slot, rev)?;
                 }
                 Ok(Err(e)) if read && is_transient(&e) => {
                     tracing::warn!(error = %e, "db: transient error on read, retrying");
@@ -299,7 +360,7 @@ impl Db {
                 Ok(Err(e)) => return Err(AppError::Database(e)),
                 Err(_) if read => {
                     tracing::warn!("db: query timed out, reconnecting");
-                    (rev, conn) = self.reconnect(rev)?;
+                    (rev, conn) = Self::reconnect(&self.database, &slot, rev)?;
                 }
                 Err(_) => return Err(AppError::Internal("db query timed out".into())),
             }
@@ -420,13 +481,13 @@ impl Db {
     /// otherwise means it may have landed.
     pub async fn execute(&self, sql: &str, params: impl libsql::params::IntoParams) -> Result<u64> {
         let params = params.into_params()?;
-        let (mut rev, mut conn) = self.conn_handle();
+        let (slot, mut rev, mut conn) = self.checkout();
         for _ in 0..2 {
             match timeout(QUERY_TIMEOUT, conn.execute(sql, params.clone())).await {
                 Ok(Ok(n)) => return Ok(n),
                 Ok(Err(e)) if is_stream_dead(&e) => {
                     tracing::warn!(error = %e, "db: remote stream lost, reconnecting");
-                    (rev, conn) = self.reconnect(rev)?;
+                    (rev, conn) = Self::reconnect(&self.database, &slot, rev)?;
                 }
                 Ok(Err(e)) => return Err(AppError::Database(e)),
                 Err(_) => return Err(AppError::Internal("db execute timed out".into())),
@@ -437,13 +498,13 @@ impl Db {
 
     /// Multi-statement script — migrations and `PRAGMA`.
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
-        let (mut rev, mut conn) = self.conn_handle();
+        let (slot, mut rev, mut conn) = self.checkout();
         for _ in 0..2 {
             match timeout(QUERY_TIMEOUT, conn.execute_batch(sql)).await {
                 Ok(Ok(_)) => return Ok(()),
                 Ok(Err(e)) if is_stream_dead(&e) => {
                     tracing::warn!(error = %e, "db: remote stream lost, reconnecting");
-                    (rev, conn) = self.reconnect(rev)?;
+                    (rev, conn) = Self::reconnect(&self.database, &slot, rev)?;
                 }
                 Ok(Err(e)) => return Err(AppError::Database(e)),
                 Err(_) => return Err(AppError::Internal("db batch timed out".into())),
@@ -453,17 +514,26 @@ impl Db {
     }
 
     /// Interactive transaction (`tx.query`/`tx.execute`/`tx.commit`) —
-    /// replaces `db.pool().begin()`.
+    /// replaces `db.pool().begin()`. Remote txs get a *dedicated* conn:
+    /// a pooled slot's stream is shared, so concurrent statements would
+    /// silently join the tx's baton. Local keeps the slot conn —
+    /// `:memory:` databases would be empty on a fresh conn.
     pub async fn transaction(&self) -> Result<libsql::Transaction> {
-        let (mut rev, mut conn) = self.conn_handle();
         for _ in 0..2 {
+            let conn = if self.remote {
+                let conn = self.database.connect()?;
+                let _ = conn.execute_batch("PRAGMA foreign_keys = ON").await;
+                conn
+            } else {
+                self.checkout().2
+            };
             match timeout(QUERY_TIMEOUT, conn.transaction()).await {
                 Ok(Ok(tx)) => return Ok(tx),
-                Ok(Err(e)) if is_stream_dead(&e) => {
-                    (rev, conn) = self.reconnect(rev)?;
+                Ok(Err(e)) if is_stream_dead(&e) || (self.remote && is_transient(&e)) => {
+                    tracing::warn!(error = %e, "db: transaction conn lost, redialing");
                 }
                 Ok(Err(e)) => return Err(AppError::Database(e)),
-                Err(_) => Err(AppError::Internal("db transaction timed out".into()))?,
+                Err(_) => return Err(AppError::Internal("db transaction timed out".into())),
             }
         }
         Err(AppError::Internal(
@@ -475,7 +545,7 @@ impl Db {
     /// don't cover. Note the handle can be swapped out by a reconnect;
     /// prefer the `Db` helpers, which follow swaps automatically.
     pub fn conn(&self) -> Connection {
-        self.conn_handle().1
+        self.checkout().2
     }
 }
 
@@ -672,20 +742,21 @@ mod tests {
     #[tokio::test]
     async fn reconnect_swaps_conn_once_per_generation() {
         let (db, _dir) = test_db().await;
-        let (g0, _) = db.conn_handle();
+        assert_eq!(db.slots.len(), 1);
+        let (slot, g0, _) = db.checkout();
 
         // First caller performs the swap.
-        let (g1, c1) = db.reconnect(g0).unwrap();
+        let (g1, c1) = Db::reconnect(&db.database, &slot, g0).unwrap();
         assert_eq!(g1, g0 + 1);
 
         // A concurrent caller that saw the old generation does NOT dial
         // again — it picks up the conn the first caller installed.
-        let (g2, c2) = db.reconnect(g0).unwrap();
+        let (g2, c2) = Db::reconnect(&db.database, &slot, g0).unwrap();
         assert_eq!(g2, g1);
 
-        // The shared handle now serves the swapped conn; both clones
-        // work against the same database.
-        let (g3, _) = db.conn_handle();
+        // The slot now serves the swapped conn; both clones work against
+        // the same database.
+        let (_, g3, _) = db.checkout();
         assert_eq!(g3, g1);
         c1.execute("CREATE TABLE swap_probe (a)", ()).await.unwrap();
         c2.query("SELECT 1 FROM sqlite_master WHERE name = 'swap_probe'", ())
@@ -701,8 +772,8 @@ mod tests {
     async fn query_survives_reconnect() {
         let (db, _dir) = test_db().await;
         db.execute("CREATE TABLE survive (a)", ()).await.unwrap();
-        let (g0, _) = db.conn_handle();
-        db.reconnect(g0).unwrap();
+        let (slot, g0, _) = db.checkout();
+        Db::reconnect(&db.database, &slot, g0).unwrap();
         // `q` snapshots the handle per call — post-swap queries work.
         assert_eq!(db.scalar::<i64>("SELECT 42", ()).await.unwrap(), 42);
     }

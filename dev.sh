@@ -16,17 +16,31 @@ export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 # Prod-parity gateway: axum proxies non-/api page traffic to Next.
 export WEB_ORIGIN="${WEB_ORIGIN:-http://127.0.0.1:3000}"
 
-# Fail fast on a stale LISTENER (must filter -sTCP:LISTEN — a bare
-# `lsof -i :PORT` also matches TIME_WAIT remnants and browser-side
-# sockets, producing false "in use" reports).
-if lsof -ti :8080 -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "✗ :8080 already in use — kill it first:  pkill -f 'target/debug/openshares-server'" >&2
+# Free the dev ports — a previous run's children can linger holding them.
+# TERM first, escalate to KILL if the socket doesn't release. (Must
+# filter -sTCP:LISTEN — a bare `lsof -i :PORT` also matches TIME_WAIT
+# remnants and browser-side sockets, which would kill the wrong pid.)
+port_pids() { lsof -ti ":$1" -sTCP:LISTEN 2>/dev/null; }
+free_port() {
+  local port="$1" pids
+  pids=$(port_pids "$port" || true)
+  [ -n "$pids" ] || return 0
+  echo "▸ :$port held by pid $(echo "$pids" | tr '\n' ' ')— killing"
+  echo "$pids" | xargs kill 2>/dev/null || true
+  for _ in $(seq 1 10); do
+    port_pids "$port" >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  port_pids "$port" | xargs kill -9 2>/dev/null || true
+  for _ in $(seq 1 5); do
+    port_pids "$port" >/dev/null 2>&1 || return 0
+    sleep 1
+  done
+  echo "✗ :$port did not free up" >&2
   exit 1
-fi
-if lsof -ti :3000 -sTCP:LISTEN >/dev/null 2>&1; then
-  echo "✗ :3000 already in use — kill it first:  pkill -f 'next dev'" >&2
-  exit 1
-fi
+}
+free_port 8080
+free_port 3000
 
 SERVER_PID=
 WEB_PID=

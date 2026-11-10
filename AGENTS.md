@@ -88,7 +88,11 @@ review, and security pass below is not done.
   non-parameterized SQL (`Db::query_*`/`execute` with `libsql::params!`
   binds only — never string-built queries; raw `conn().query` is off-limits
   outside `db/mod.rs` — use `query_guard`, which carries the remote
-  timeout + stale-conn retry every Turso call needs);
+  timeout + stale-conn retry every Turso call needs). Remote conns are
+  pooled (`REMOTE_POOL_SIZE` slots — each libsql `Connection` serializes
+  its round trips internally, so slot count is the query parallelism);
+  `transaction()` gets a dedicated conn — never route pool-slot traffic
+  through a conn a transaction is open on;
   unbounded request-body or stream buffering; missing ownership/authz
   checks on authenticated routes. If the TS source has the same bug,
   still fix it — and say so in the report.
