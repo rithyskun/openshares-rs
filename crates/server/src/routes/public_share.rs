@@ -18,6 +18,7 @@ use openshares_core::db::now;
 use openshares_core::db::repos::shares;
 
 use crate::error::{ApiError, Result};
+use crate::openapi::{ErrorBody, PublicShareDto};
 use crate::state::AppState;
 
 /// Route table — merged by `routes::public_router` under `/api`.
@@ -27,8 +28,22 @@ pub fn router() -> Router<AppState> {
 
 /// `SHARE_SELECT` camelized for the page — `{slug, kind, caption,
 /// width, height, duration, fileSize, availability, ownerName,
-/// createdAt, expiresAt, likes}`.
-async fn public_share(
+/// createdAt, expiresAt, likes}`. Expired shares still 200 (the page
+/// renders "Link expired"); live shares get a `views + 1`.
+#[utoipa::path(
+    get,
+    path = "/api/public/share/{token}",
+    tag = "public",
+    params(
+        ("token" = String, Path, description = "'link' share token (expired still returns 200)"),
+    ),
+    responses(
+        (status = 200, description = "Share metadata", body = PublicShareDto),
+        (status = 404, description = "Link not found", body = ErrorBody),
+    ),
+    security(())
+)]
+pub(crate) async fn public_share(
     State(state): State<AppState>,
     Path(token): Path<String>,
 ) -> Result<Response> {

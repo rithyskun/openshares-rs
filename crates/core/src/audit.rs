@@ -145,10 +145,10 @@ pub async fn audit_entries(db: &Db, cache: &CacheBackend, limit: usize) -> Resul
     // One `users` lookup resolves every actor name, like the TS IN query.
     let mut ids: Vec<i64> = Vec::new();
     for e in &entries {
-        if let Some(id) = e.actor_user_id {
-            if !ids.contains(&id) {
-                ids.push(id);
-            }
+        if let Some(id) = e.actor_user_id
+            && !ids.contains(&id)
+        {
+            ids.push(id);
         }
     }
     let mut names: std::collections::HashMap<i64, String> = std::collections::HashMap::new();

@@ -63,12 +63,11 @@ fn site_name_cache() -> &'static Mutex<Option<(i64, String)>> {
 /// `siteName()` — display name, 60s module cache like the TS version.
 pub async fn site_name(db: &Db) -> Result<String> {
     let ts = now();
-    if let Ok(guard) = site_name_cache().lock() {
-        if let Some((at, value)) = guard.as_ref() {
-            if ts - at < SITE_NAME_TTL_SECS {
-                return Ok(value.clone());
-            }
-        }
+    if let Ok(guard) = site_name_cache().lock()
+        && let Some((at, value)) = guard.as_ref()
+        && ts - at < SITE_NAME_TTL_SECS
+    {
+        return Ok(value.clone());
     }
     let stored = get_setting(db, SITE_NAME_KEY)
         .await?

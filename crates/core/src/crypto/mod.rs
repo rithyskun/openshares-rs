@@ -52,7 +52,7 @@ pub(crate) fn hex_encode(bytes: &[u8]) -> String {
 /// treat malformed hex as "no match", which is the same outcome: the length
 /// check downstream would fail anyway.)
 pub(crate) fn hex_decode(s: &str) -> Option<Vec<u8>> {
-    if s.len() % 2 != 0 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+    if !s.len().is_multiple_of(2) || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
         return None;
     }
     let mut out = Vec::with_capacity(s.len() / 2);

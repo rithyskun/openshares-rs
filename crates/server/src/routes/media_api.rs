@@ -41,6 +41,10 @@ use openshares_core::util::{new_token, parse_int_prefix};
 use crate::body::json_body;
 use crate::error::{ApiError, Result};
 use crate::extract::AuthUser;
+use crate::openapi::{
+    CreateShareBody, ErrorBody, LinkShareCreated, MediaListResponse, MediaSummary, MoveBody,
+    MoveResponse, OkBody, RevokeShareBody, ShareLinksResponse,
+};
 use crate::routes::albums::too_many_requests;
 use crate::state::AppState;
 
@@ -68,7 +72,28 @@ pub fn router() -> Router<AppState> {
 /// resolution: album scope 404s (`"Not found."`) for missing/non-owned
 /// albums — existence hiding, same as `/album/[slug]`. Unknown scopes
 /// 400 (`"Unknown scope."`).
-async fn list_media(
+#[utoipa::path(
+    get,
+    path = "/api/media",
+    tag = "media",
+    params(
+        ("scope" = Option<String>, Query, description = "`vault` (default) or `album:<slug>`"),
+        ("q" = Option<String>, Query, description = "Caption search (trimmed, ≤200 chars)"),
+        ("kind" = Option<String>, Query, description = "`photo` | `video` — anything else is ignored"),
+        ("missing" = Option<String>, Query, description = "`1` → only dead/missing items"),
+        ("cursor" = Option<String>, Query, description = "Opaque `nextCursor` from the previous page"),
+        ("limit" = Option<i64>, Query, description = "Page size — clamped 1–100 (default 60)"),
+    ),
+    responses(
+        (status = 200, description = "One page of gallery items", body = MediaListResponse),
+        (status = 400, description = "Unknown scope", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `media:view`", body = ErrorBody),
+        (status = 404, description = "Album missing or not owned (existence hidden)", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn list_media(
     State(state): State<AppState>,
     user: AuthUser,
     RawQuery(raw): RawQuery,
@@ -246,7 +271,21 @@ fn album_cursor(s: &str) -> Option<MediaCursor> {
 /// `GET /api/media/summary` — `{count, bytes}` vault-wide totals for
 /// the gallery header (the old page's inline `COUNT(*)`/`SUM(file_size)`).
 /// Same `media:view` gate as the listing.
-async fn media_summary(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
+#[utoipa::path(
+    get,
+    path = "/api/media/summary",
+    tag = "media",
+    responses(
+        (status = 200, description = "Vault totals", body = MediaSummary),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `media:view`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn media_summary(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Response> {
     if !user.0.can("media:view", None) {
         return Err(ApiError::forbidden("Not allowed."));
     }
@@ -260,7 +299,23 @@ async fn media_summary(State(state): State<AppState>, user: AuthUser) -> Result<
 /// `share:link` required (403); `media:delete:any` holders see every
 /// user's links, others only their own (`created_by = NULL` → all in
 /// `shares::list_links`).
-async fn list_share_links(
+/// `GET /api/media/{slug}/share` — live `/s/<token>` links for one item.
+/// `share:link` required; `media:delete:any` holders see every user's
+/// links, others only their own.
+#[utoipa::path(
+    get,
+    path = "/api/media/{slug}/share",
+    tag = "media",
+    params(("slug" = String, Path, description = "Media slug")),
+    responses(
+        (status = 200, description = "Live share links", body = ShareLinksResponse),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `share:link`", body = ErrorBody),
+        (status = 404, description = "Media not found", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn list_share_links(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     user: AuthUser,
@@ -297,7 +352,25 @@ async fn list_share_links(
 /// links need `share:link` (checked before the row exists, like the TS
 /// route); revoking someone else's needs `media:delete:any`. Audit:
 /// `share.link.revoke` with the token's first 8 chars as detail.
-async fn revoke_share_link(
+/// `DELETE /api/media/{slug}/share { token }` — revoke one link. Own
+/// links need `share:link`; someone else's need `media:delete:any`.
+/// Audit: `share.link.revoke`.
+#[utoipa::path(
+    delete,
+    path = "/api/media/{slug}/share",
+    tag = "media",
+    params(("slug" = String, Path, description = "Media slug")),
+    request_body = RevokeShareBody,
+    responses(
+        (status = 200, description = "Link revoked", body = OkBody),
+        (status = 400, description = "Missing token", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `share:link` / not the link owner", body = ErrorBody),
+        (status = 404, description = "Media or link not found", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn revoke_share_link(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     user: AuthUser,
@@ -345,7 +418,29 @@ async fn revoke_share_link(
 /// `/s/<token>` (`share:link`); `{mode:"telegram", friend_id}` delivers
 /// the file into a friend's chat via the bot (`share:friend`). The
 /// route is `API_LIMITER`-rated on `share:<uid>` before anything else.
-async fn create_share(
+/// `POST /api/media/{slug}/share` — `{mode:"link"}` mints a public
+/// `/s/<token>` (`share:link`); `{mode:"telegram", friend_id}` delivers
+/// the file into a friend's chat via the bot (`share:friend`). Rated
+/// `API_LIMITER` on `share:<uid>` first.
+#[utoipa::path(
+    post,
+    path = "/api/media/{slug}/share",
+    tag = "media",
+    params(("slug" = String, Path, description = "Media slug")),
+    request_body = CreateShareBody,
+    responses(
+        (status = 200, description = "`mode:\"link\"` → `LinkShareCreated`; `mode:\"telegram\"` → `{mode, ok:true}`", body = LinkShareCreated),
+        (status = 400, description = "Unknown mode / pick a friend first", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `share:link` / `share:friend`", body = ErrorBody),
+        (status = 404, description = "Media not found", body = ErrorBody),
+        (status = 410, description = "Original Telegram file is gone", body = ErrorBody),
+        (status = 429, description = "Rate limited — `Retry-After: 60`", body = ErrorBody),
+        (status = 502, description = "Bot not configured / Telegram rejected the delivery", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn create_share(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     user: AuthUser,
@@ -491,10 +586,11 @@ fn parse_slugs(raw: Option<&Value>) -> Result<Vec<String>> {
     let mut seen = HashSet::new();
     let mut slugs = Vec::new();
     for item in items {
-        if let Value::String(s) = item {
-            if !s.is_empty() && seen.insert(s.clone()) {
-                slugs.push(s.clone());
-            }
+        if let Value::String(s) = item
+            && !s.is_empty()
+            && seen.insert(s.clone())
+        {
+            slugs.push(s.clone());
         }
     }
     if slugs.is_empty() {
@@ -533,7 +629,24 @@ fn parse_album_target(raw: Option<&Value>) -> Result<AlbumTarget> {
 /// owner), `album:edit` on the target; already-there rows are `skipped`,
 /// missing slugs and denied items count `failed`. One `media.move`
 /// audit entry, only when `moved > 0`.
-async fn move_media(
+/// `POST /api/media/move { slugs, albumId }` — batch re-file into an
+/// album or back to the vault (`albumId: null`). Per-owner `media:edit`,
+/// `album:edit` on the target. One `media.move` audit entry.
+#[utoipa::path(
+    post,
+    path = "/api/media/move",
+    tag = "media",
+    request_body = MoveBody,
+    responses(
+        (status = 200, description = "Move outcome counts", body = MoveResponse),
+        (status = 400, description = "No items / >100 items / invalid album", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `album:edit` on the target", body = ErrorBody),
+        (status = 404, description = "Album not found", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn move_media(
     State(state): State<AppState>,
     user: AuthUser,
     req: Request,

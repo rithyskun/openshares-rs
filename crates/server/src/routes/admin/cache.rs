@@ -23,6 +23,7 @@ use openshares_core::settings::{get_setting, set_setting};
 use crate::body::{json_body, raw_body};
 use crate::error::{ApiError, Result};
 use crate::extract::AuthUser;
+use crate::openapi::{CacheState, ErrorBody, PatchCacheResponse, RunCacheResponse};
 use crate::state::AppState;
 
 use super::{guard, mb};
@@ -36,10 +37,13 @@ const MAX_CACHE_TTL_DAYS: i64 = 90;
 
 /// `CacheCleanupStats` — written under `cache_last_cleanup` and returned
 /// by POST. Field names are camelCase like the TS object.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, utoipa::ToSchema)]
 pub struct CacheCleanupStats {
+    /// unix seconds — when the sweep ran.
     pub at: i64,
+    /// Objects examined.
     pub scanned: u64,
+    /// Objects evicted.
     pub deleted: u64,
     #[serde(rename = "freedBytes")]
     pub freed_bytes: u64,
@@ -89,15 +93,28 @@ async fn last_cache_cleanup(db: &Db) -> CoreResult<Option<CacheCleanupStats>> {
 }
 
 /// GET — `{ ttlDays, last }`.
-async fn get_cache(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
+#[utoipa::path(
+    get,
+    path = "/api/admin/cache",
+    tag = "admin",
+    responses(
+        (status = 200, description = "Rotation TTL + last sweep stats", body = CacheState),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `settings:manage`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn get_cache(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
     guard(&state, &user.0, "settings:manage").await?;
     let ttl_days = cache_ttl_days(&state.db).await?;
     let last = last_cache_cleanup(&state.db).await?;
     Ok(Json(json!({ "ttlDays": ttl_days, "last": last })).into_response())
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 struct TtlBody {
+    /// Number of days — JS `Number(v)` coercion accepts strings/bools;
+    /// clamped to 1–90.
     #[serde(rename = "ttlDays")]
     ttl_days: Option<serde_json::Value>,
 }
@@ -117,7 +134,20 @@ fn js_number(v: Option<&serde_json::Value>) -> f64 {
 }
 
 /// PATCH — update the rotation TTL in days (clamped 1–90).
-async fn patch_cache(
+#[utoipa::path(
+    patch,
+    path = "/api/admin/cache",
+    tag = "admin",
+    request_body = TtlBody,
+    responses(
+        (status = 200, description = "TTL updated", body = PatchCacheResponse),
+        (status = 400, description = "ttlDays not a finite number ≥ 1", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `settings:manage`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn patch_cache(
     State(state): State<AppState>,
     user: AuthUser,
     req: Request,
@@ -144,8 +174,19 @@ async fn patch_cache(
 }
 
 /// POST — run the sweeper immediately (same code path as the daily
-/// cron in the TS app).
-async fn post_cache(
+/// cron in the TS app). Signed empty body.
+#[utoipa::path(
+    post,
+    path = "/api/admin/cache",
+    tag = "admin",
+    responses(
+        (status = 200, description = "Sweep finished — stats recorded", body = RunCacheResponse),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `settings:manage`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn post_cache(
     State(state): State<AppState>,
     user: AuthUser,
     req: Request,

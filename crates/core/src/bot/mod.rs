@@ -228,17 +228,17 @@ async fn handle_start_code(
         .await;
         return Ok(());
     }
-    if let Some(expiry) = row.expiry_at {
-        if expiry < now() {
-            reply(
-                ctx,
-                chat_id,
-                "That code expired. Ask for a fresh one on the website.",
-                None,
-            )
-            .await;
-            return Ok(());
-        }
+    if let Some(expiry) = row.expiry_at
+        && expiry < now()
+    {
+        reply(
+            ctx,
+            chat_id,
+            "That code expired. Ask for a fresh one on the website.",
+            None,
+        )
+        .await;
+        return Ok(());
     }
 
     if row.purpose == "friend" {
@@ -1131,35 +1131,35 @@ async fn finish_pending(ctx: &BotContext, tg_id: &str, chat_id: i64) -> anyhow::
         return Ok(());
     };
     clear_bot_state(&ctx.db, tg_id).await?;
-    if state.action == "album_upload" {
-        if let Some(album_id) = state.album_id {
-            let title: Option<String> = ctx
-                .db
-                .scalar_opt(
-                    "SELECT title FROM albums WHERE id = ?",
-                    libsql::params![album_id],
-                )
-                .await?;
-            let added: i64 = ctx
-                .db
-                .scalar(
-                    "SELECT COUNT(*) FROM media WHERE album_id = ? AND created_at >= ?",
-                    libsql::params![album_id, state.updated_at],
-                )
-                .await?;
-            reply(
-                ctx,
-                chat_id,
-                &format!(
-                    "Done — added {added} item{} to \"<b>{}</b>\". Uploads go to your library again.",
-                    if added == 1 { "" } else { "s" },
-                    escape_html(title.as_deref().unwrap_or("album"))
-                ),
-                None,
+    if state.action == "album_upload"
+        && let Some(album_id) = state.album_id
+    {
+        let title: Option<String> = ctx
+            .db
+            .scalar_opt(
+                "SELECT title FROM albums WHERE id = ?",
+                libsql::params![album_id],
             )
-            .await;
-            return Ok(());
-        }
+            .await?;
+        let added: i64 = ctx
+            .db
+            .scalar(
+                "SELECT COUNT(*) FROM media WHERE album_id = ? AND created_at >= ?",
+                libsql::params![album_id, state.updated_at],
+            )
+            .await?;
+        reply(
+            ctx,
+            chat_id,
+            &format!(
+                "Done — added {added} item{} to \"<b>{}</b>\". Uploads go to your library again.",
+                if added == 1 { "" } else { "s" },
+                escape_html(title.as_deref().unwrap_or("album"))
+            ),
+            None,
+        )
+        .await;
+        return Ok(());
     }
     reply(
         ctx,
@@ -1633,24 +1633,23 @@ async fn handle_incoming_media(
     let mut album_id: Option<i64> = None;
     let mut album_title: Option<String> = None;
     let mut armed = false;
-    if let Some(state) = get_bot_state(&ctx.db, &tg_id).await? {
-        if state.action == "album_upload" {
-            if let Some(id) = state.album_id {
-                let alb: Option<TitleRow> = ctx
-                    .db
-                    .query_opt(
-                        "SELECT title FROM albums WHERE id = ? AND owner_user_id = ?",
-                        libsql::params![id, owner],
-                    )
-                    .await?;
-                if let Some(a) = alb {
-                    album_id = Some(id);
-                    album_title = Some(a.title);
-                    armed = true;
-                } else {
-                    clear_bot_state(&ctx.db, &tg_id).await?; // stale pointer
-                }
-            }
+    if let Some(state) = get_bot_state(&ctx.db, &tg_id).await?
+        && state.action == "album_upload"
+        && let Some(id) = state.album_id
+    {
+        let alb: Option<TitleRow> = ctx
+            .db
+            .query_opt(
+                "SELECT title FROM albums WHERE id = ? AND owner_user_id = ?",
+                libsql::params![id, owner],
+            )
+            .await?;
+        if let Some(a) = alb {
+            album_id = Some(id);
+            album_title = Some(a.title);
+            armed = true;
+        } else {
+            clear_bot_state(&ctx.db, &tg_id).await?; // stale pointer
         }
     }
 
@@ -1681,16 +1680,15 @@ async fn handle_incoming_media(
                 .as_deref()
                 .map(str::trim)
                 .filter(|c| !c.is_empty())
+                && title.starts_with("Telegram drop ")
             {
-                if title.starts_with("Telegram drop ") {
-                    title = cap.chars().take(200).collect();
-                    ctx.db
-                        .execute(
-                            "UPDATE albums SET title = ? WHERE id = ?",
-                            libsql::params![title.as_str(), h.album_id],
-                        )
-                        .await?;
-                }
+                title = cap.chars().take(200).collect();
+                ctx.db
+                    .execute(
+                        "UPDATE albums SET title = ? WHERE id = ?",
+                        libsql::params![title.as_str(), h.album_id],
+                    )
+                    .await?;
             }
             album_title = Some(title);
         } else {
@@ -1891,26 +1889,18 @@ async fn process_inner(ctx: &BotContext, update: TgUpdate) -> anyhow::Result<()>
 
     // In-flight flows: plain text answers a pending prompt instead of a command.
     let state = get_bot_state(&ctx.db, &tg_id).await?;
-    if let Some(st) = &state {
-        if !text.starts_with('/') {
-            if st.action == "album_title" {
-                clear_bot_state(&ctx.db, &tg_id).await?;
-                let allowed = match owner {
-                    Some(o) => can(&ctx.db, o, "album:create", None).await?,
-                    None => false,
-                };
-                if let Some(o) = owner {
-                    if allowed {
-                        create_album(ctx, o, text, chat_id).await?;
-                    } else {
-                        reply(
-                            ctx,
-                            chat_id,
-                            "Link your account first, or ask an admin for album permission.",
-                            None,
-                        )
-                        .await;
-                    }
+    if let Some(st) = &state
+        && !text.starts_with('/')
+    {
+        if st.action == "album_title" {
+            clear_bot_state(&ctx.db, &tg_id).await?;
+            let allowed = match owner {
+                Some(o) => can(&ctx.db, o, "album:create", None).await?,
+                None => false,
+            };
+            if let Some(o) = owner {
+                if allowed {
+                    create_album(ctx, o, text, chat_id).await?;
                 } else {
                     reply(
                         ctx,
@@ -1920,28 +1910,36 @@ async fn process_inner(ctx: &BotContext, update: TgUpdate) -> anyhow::Result<()>
                     )
                     .await;
                 }
-                return Ok(());
+            } else {
+                reply(
+                    ctx,
+                    chat_id,
+                    "Link your account first, or ask an admin for album permission.",
+                    None,
+                )
+                .await;
             }
-            let title: Option<String> = match st.album_id {
-                Some(id) => {
-                    ctx.db
-                        .scalar_opt("SELECT title FROM albums WHERE id = ?", libsql::params![id])
-                        .await?
-                }
-                None => None,
-            };
-            reply(
-                ctx,
-                chat_id,
-                &format!(
-                    "📤 Still collecting for \"<b>{}</b>\" — send photos/videos, or /done to finish.",
-                    escape_html(title.as_deref().unwrap_or("your album"))
-                ),
-                None,
-            )
-            .await;
             return Ok(());
         }
+        let title: Option<String> = match st.album_id {
+            Some(id) => {
+                ctx.db
+                    .scalar_opt("SELECT title FROM albums WHERE id = ?", libsql::params![id])
+                    .await?
+            }
+            None => None,
+        };
+        reply(
+            ctx,
+            chat_id,
+            &format!(
+                "📤 Still collecting for \"<b>{}</b>\" — send photos/videos, or /done to finish.",
+                escape_html(title.as_deref().unwrap_or("your album"))
+            ),
+            None,
+        )
+        .await;
+        return Ok(());
     }
     // Any command abandons a pending "name the album" prompt.
     if state.as_ref().is_some_and(|s| s.action == "album_title") {
@@ -2127,12 +2125,11 @@ const BOT_USERNAME_TTL_SECS: i64 = 600;
 pub async fn get_bot_username(ctx: &BotContext) -> Option<String> {
     let ts = now();
     let cache = BOT_USERNAME_CACHE.get_or_init(|| Mutex::new(None));
-    if let Ok(guard) = cache.lock() {
-        if let Some((at, u)) = guard.as_ref() {
-            if ts - at < BOT_USERNAME_TTL_SECS {
-                return u.clone();
-            }
-        }
+    if let Ok(guard) = cache.lock()
+        && let Some((at, u)) = guard.as_ref()
+        && ts - at < BOT_USERNAME_TTL_SECS
+    {
+        return u.clone();
     }
     // Persisted username wins — avoids a Telegram round-trip per share.
     if let Ok(Some(stored)) = stored_bot_username(&ctx.db).await {
@@ -2201,16 +2198,16 @@ pub async fn deliver_share(
     match res {
         Ok(_) => Ok(()),
         Err(e) => {
-            if let Some(id) = media.id {
-                if is_dead_file_error(&e) {
-                    let _ = ctx
-                        .db
-                        .execute(
-                            "UPDATE media SET missing = 1 WHERE id = ?",
-                            libsql::params![id],
-                        )
-                        .await;
-                }
+            if let Some(id) = media.id
+                && is_dead_file_error(&e)
+            {
+                let _ = ctx
+                    .db
+                    .execute(
+                        "UPDATE media SET missing = 1 WHERE id = ?",
+                        libsql::params![id],
+                    )
+                    .await;
             }
             Err(anyhow::anyhow!(e))
         }

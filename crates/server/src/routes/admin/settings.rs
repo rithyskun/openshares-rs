@@ -17,6 +17,7 @@ use openshares_core::settings::{set_site_name, site_name};
 use crate::body::json_body;
 use crate::error::{ApiError, Result};
 use crate::extract::AuthUser;
+use crate::openapi::{ErrorBody, SettingsPatched, SettingsResponse};
 use crate::state::AppState;
 
 use super::guard;
@@ -26,20 +27,47 @@ pub(super) fn router() -> Router<AppState> {
 }
 
 /// GET — `{ siteName }` (the current display name).
-async fn get_settings(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
+#[utoipa::path(
+    get,
+    path = "/api/admin/settings",
+    tag = "admin",
+    responses(
+        (status = 200, description = "Current site name", body = SettingsResponse),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `settings:manage`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn get_settings(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Response> {
     guard(&state, &user.0, "settings:manage").await?;
     let name = site_name(&state.db).await?;
     Ok(Json(json!({ "siteName": name })).into_response())
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 struct SettingsBody {
     #[serde(rename = "siteName")]
     site_name: Option<String>,
 }
 
 /// PATCH `{ siteName }` — rename the whole app.
-async fn patch_settings(
+#[utoipa::path(
+    patch,
+    path = "/api/admin/settings",
+    tag = "admin",
+    request_body = SettingsBody,
+    responses(
+        (status = 200, description = "Site renamed", body = SettingsPatched),
+        (status = 400, description = "Missing/non-string siteName", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `settings:manage`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn patch_settings(
     State(state): State<AppState>,
     user: AuthUser,
     req: Request,

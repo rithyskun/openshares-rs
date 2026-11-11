@@ -67,10 +67,10 @@ fn is_sign_exempt(path: &str) -> bool {
     if path.starts_with("/api/auth/") || path.starts_with("/api/bot/") {
         return true;
     }
-    if let Some(rest) = path.strip_prefix("/api/albums/") {
-        if let Some(slug) = rest.strip_suffix("/files") {
-            return !slug.is_empty() && !slug.contains('/');
-        }
+    if let Some(rest) = path.strip_prefix("/api/albums/")
+        && let Some(slug) = rest.strip_suffix("/files")
+    {
+        return !slug.is_empty() && !slug.contains('/');
     }
     false
 }

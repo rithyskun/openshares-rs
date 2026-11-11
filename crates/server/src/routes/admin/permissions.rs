@@ -14,6 +14,7 @@ use openshares_core::rbac::PERMISSIONS;
 
 use crate::error::Result;
 use crate::extract::AuthUser;
+use crate::openapi::{ErrorBody, PermissionsResponse};
 use crate::state::AppState;
 
 use super::guard;
@@ -22,7 +23,23 @@ pub(super) fn router() -> Router<AppState> {
     Router::new().route("/admin/permissions", get(get_permissions))
 }
 
-async fn get_permissions(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
+/// `{permissions: [{resource, keys}]}` — the RBAC catalog grouped by
+/// resource in first-seen (catalog) order.
+#[utoipa::path(
+    get,
+    path = "/api/admin/permissions",
+    tag = "admin",
+    responses(
+        (status = 200, description = "Permission catalog grouped by resource", body = PermissionsResponse),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `admin:access`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn get_permissions(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Response> {
     guard(&state, &user.0, "admin:access").await?;
 
     // In-order grouping — resources appear in first-seen catalog order.

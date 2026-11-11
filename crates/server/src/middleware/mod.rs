@@ -36,6 +36,7 @@
 /// tracing instrumentation — the rest stay crate-private like the TS file.
 pub mod correlation;
 mod csrf;
+pub mod docs_auth;
 mod rate_limit;
 mod same_origin;
 mod security_headers;

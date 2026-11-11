@@ -23,6 +23,7 @@ use openshares_core::rbac;
 use crate::body::{json_body, raw_body};
 use crate::error::{ApiError, Result};
 use crate::extract::AuthUser;
+use crate::openapi::{ErrorBody, OkBody, PatchRoleBody, RoleCreated, RolesResponse};
 use crate::state::AppState;
 
 use super::{guard, js_id, js_string, valid_role_name};
@@ -36,7 +37,18 @@ pub(super) fn router() -> Router<AppState> {
 /// GET — roles with permission keys + member counts, `ORDER BY builtin
 /// DESC, name` (built-ins first). `{...r, permissions, memberCount}`
 /// like the TS route — the role row itself is only `id/name/builtin`.
-async fn list_roles(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
+#[utoipa::path(
+    get,
+    path = "/api/admin/roles",
+    tag = "admin",
+    responses(
+        (status = 200, description = "Roles + permission keys + member counts", body = RolesResponse),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `admin:access`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn list_roles(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
     guard(&state, &user.0, "admin:access").await?;
 
     let role_rows = roles_repo::list(&state.db).await?;
@@ -67,13 +79,28 @@ async fn list_roles(State(state): State<AppState>, user: AuthUser) -> Result<Res
     Ok(Json(json!({ "roles": roles_json })).into_response())
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 struct CreateBody {
+    /// `^[a-z][a-z0-9_-]{1,30}$`.
     name: Option<String>,
 }
 
 /// POST `{ name }` — create a custom role (`builtin = 0`).
-async fn create_role(
+#[utoipa::path(
+    post,
+    path = "/api/admin/roles",
+    tag = "admin",
+    request_body = CreateBody,
+    responses(
+        (status = 200, description = "Role created", body = RoleCreated),
+        (status = 400, description = "Invalid role name", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `role:manage`", body = ErrorBody),
+        (status = 409, description = "Name already exists", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn create_role(
     State(state): State<AppState>,
     user: AuthUser,
     req: Request,
@@ -111,7 +138,27 @@ async fn create_role(
 /// leave the vault without an admin. Like the TS route, `role.rename`
 /// is audited after `role.permissions.update`, and the permissions
 /// audit names the role as loaded (pre-rename).
-async fn patch_role(
+/// `PATCH /admin/roles/{id}` — `{ name }` renames (custom roles only),
+/// `{ permissions: string[] }` replaces the permission set. `*` is only
+/// allowed on the built-in `admin` role; removing it must not leave the
+/// vault without an admin.
+#[utoipa::path(
+    patch,
+    path = "/api/admin/roles/{id}",
+    tag = "admin",
+    params(("id" = i64, Path, description = "Role id")),
+    request_body = PatchRoleBody,
+    responses(
+        (status = 200, description = "Role updated", body = OkBody),
+        (status = 400, description = "Bad id / invalid name / unknown permission keys / `*` on a non-admin role", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `role:manage`", body = ErrorBody),
+        (status = 404, description = "Role not found", body = ErrorBody),
+        (status = 409, description = "Name taken / would orphan the vault without an admin", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn patch_role(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
@@ -194,26 +241,42 @@ async fn patch_role(
         }
     }
 
-    if let Some(name_value) = body.get("name") {
-        if let Some(raw) = name_value.as_str() {
-            let name = raw.trim().to_lowercase();
-            audit(
-                &state.cache,
-                Some(user.0.id),
-                "role.rename",
-                Some("role"),
-                Some(&name),
-                None,
-            )
-            .await;
-        }
+    if let Some(name_value) = body.get("name")
+        && let Some(raw) = name_value.as_str()
+    {
+        let name = raw.trim().to_lowercase();
+        audit(
+            &state.cache,
+            Some(user.0.id),
+            "role.rename",
+            Some("role"),
+            Some(&name),
+            None,
+        )
+        .await;
     }
 
     Ok(Json(json!({ "ok": true })).into_response())
 }
 
 /// DELETE `/admin/roles/{id}` — custom roles only, last-admin guarded.
-async fn delete_role(
+/// Signed empty body.
+#[utoipa::path(
+    delete,
+    path = "/api/admin/roles/{id}",
+    tag = "admin",
+    params(("id" = i64, Path, description = "Role id")),
+    responses(
+        (status = 200, description = "Role deleted", body = OkBody),
+        (status = 400, description = "Bad id / built-in role", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `role:manage`", body = ErrorBody),
+        (status = 404, description = "Role not found", body = ErrorBody),
+        (status = 409, description = "Would orphan the vault without an admin", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn delete_role(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,

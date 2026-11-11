@@ -20,14 +20,15 @@
 //! | `/admin/users/{id}/roles`      | POST, PUT, DELETE     | `user:manage`    |
 //! | `/admin/vault`                 | GET                   | `admin:access`   |
 //!
-mod access;
-mod activity;
-mod cache;
-mod permissions;
-mod roles;
-mod settings;
-mod users;
-mod vault;
+// `pub(crate)` — `openapi::ApiDoc` references the handlers by path.
+pub(crate) mod access;
+pub(crate) mod activity;
+pub(crate) mod cache;
+pub(crate) mod permissions;
+pub(crate) mod roles;
+pub(crate) mod settings;
+pub(crate) mod users;
+pub(crate) mod vault;
 
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};

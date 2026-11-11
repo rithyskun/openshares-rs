@@ -29,6 +29,7 @@ use openshares_core::db::repos::{albums, media, shares};
 
 use crate::error::{ApiError, Result};
 use crate::extract::cookie_value;
+use crate::openapi::{ErrorBody, LikeResponse, PublicAlbumResponse};
 use crate::state::AppState;
 
 /// `LIKE_COOKIE_TTL` — 1 year in seconds (likes.ts).
@@ -114,7 +115,7 @@ fn liked_response(likes: i64, cookie: Option<String>) -> Response {
 /* ---------------------- GET /public/album ---------------------- */
 
 #[derive(Debug, Deserialize)]
-struct PublicAlbumQuery {
+pub(crate) struct PublicAlbumQuery {
     token: Option<String>,
     cursor: Option<String>,
     limit: Option<String>,
@@ -123,7 +124,24 @@ struct PublicAlbumQuery {
 /// `GET /api/public/album?token=<t>&cursor=<id>&limit=<n>` — page
 /// through a live public album's media (`id ASC` keyset, like
 /// `MediaScope::Album`). An expired share lazily revokes and 404s.
-async fn public_album(
+/// First (cursor-less) call counts a view and includes the album head.
+#[utoipa::path(
+    get,
+    path = "/api/public/album",
+    tag = "public",
+    params(
+        ("token" = String, Query, description = "Live public-album token"),
+        ("cursor" = Option<String>, Query, description = "Album keyset cursor (media id)"),
+        ("limit" = Option<i64>, Query, description = "Page size — clamped 1–100 (default 60)"),
+    ),
+    responses(
+        (status = 200, description = "Album page — `album` head only when no cursor", body = PublicAlbumResponse),
+        (status = 400, description = "Missing token", body = ErrorBody),
+        (status = 404, description = "Unknown or expired token", body = ErrorBody),
+    ),
+    security(())
+)]
+pub(crate) async fn public_album(
     State(state): State<AppState>,
     Query(query): Query<PublicAlbumQuery>,
 ) -> Result<Response> {
@@ -204,13 +222,27 @@ async fn public_album(
 /* -------------------- POST /public/album/like -------------------- */
 
 #[derive(Debug, Deserialize)]
-struct AlbumLikeQuery {
+pub(crate) struct AlbumLikeQuery {
     token: Option<String>,
 }
 
 /// `POST /api/public/album/like?token=<t>` — same live-album gate as the
 /// GET; one like per visitor, deduped by the `oslk_a_<token>` cookie.
-async fn like_album(
+#[utoipa::path(
+    post,
+    path = "/api/public/album/like",
+    tag = "public",
+    params(
+        ("token" = String, Query, description = "Live public-album token"),
+    ),
+    responses(
+        (status = 200, description = "New like count — `Set-Cookie: oslk_a_<token>` dedups repeat likes", body = LikeResponse),
+        (status = 400, description = "Missing token", body = ErrorBody),
+        (status = 404, description = "Unknown or expired token", body = ErrorBody),
+    ),
+    security(())
+)]
+pub(crate) async fn like_album(
     State(state): State<AppState>,
     Query(query): Query<AlbumLikeQuery>,
     headers: HeaderMap,
@@ -249,7 +281,20 @@ async fn like_album(
 
 /// `POST /api/public/share/<token>/like` — live `'link'` shares only;
 /// same per-visitor cookie dedup under `oslk_s_<token>`.
-async fn like_share(
+#[utoipa::path(
+    post,
+    path = "/api/public/share/{token}/like",
+    tag = "public",
+    params(
+        ("token" = String, Path, description = "Live 'link' share token"),
+    ),
+    responses(
+        (status = 200, description = "New like count — `Set-Cookie: oslk_s_<token>` dedups repeat likes", body = LikeResponse),
+        (status = 404, description = "Unknown or expired token", body = ErrorBody),
+    ),
+    security(())
+)]
+pub(crate) async fn like_share(
     State(state): State<AppState>,
     Path(token): Path<String>,
     headers: HeaderMap,

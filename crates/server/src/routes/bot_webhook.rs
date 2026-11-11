@@ -23,6 +23,7 @@ use openshares_core::bot::{BotContext, TgUpdate, process_update};
 use openshares_core::crypto::security::secret_eq;
 
 use crate::error::{ApiError, Result};
+use crate::openapi::{ErrorBody, OkBody};
 use crate::state::AppState;
 
 /// Telegram's secret-token header — the value given to
@@ -34,7 +35,22 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/bot/webhook", post(bot_webhook))
 }
 
-async fn bot_webhook(
+/// Telegram webhook — verified via the `x-telegram-bot-api-secret-token`
+/// header (constant-time vs `WEBHOOK_SECRET`, fail-closed when unset).
+/// Verified updates process in a spawned task; the response never waits.
+#[utoipa::path(
+    post,
+    path = "/api/bot/webhook",
+    tag = "bot",
+    request_body(content = serde_json::Value, description = "Telegram Update object — malformed JSON still answers {ok:true}"),
+    responses(
+        (status = 200, description = "Update accepted (processed in background)", body = OkBody),
+        (status = 401, description = "Missing/wrong secret-token header", body = ErrorBody),
+        (status = 500, description = "Bot not configured", body = ErrorBody),
+    ),
+    security(("webhook_secret" = []))
+)]
+pub(crate) async fn bot_webhook(
     State(state): State<AppState>,
     headers: HeaderMap,
     body: Bytes,

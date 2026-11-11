@@ -43,6 +43,10 @@ use openshares_core::util::{new_token, random_slug};
 use crate::body::{json_body, raw_body};
 use crate::error::{ApiError, Result};
 use crate::extract::AuthUser;
+use crate::openapi::{
+    AlbumCreated, AlbumDto, AlbumsResponse, CreateAlbumBody, ErrorBody, OkBody, PatchAlbumBody,
+    PatchAlbumResponse, UploadForm, UploadResponse,
+};
 use crate::state::AppState;
 
 /// `MAX_BYTES` — Bot API upload limit per file (50 MB).
@@ -151,7 +155,19 @@ async fn revoke_if_expired(
 /// `GET /api/albums` — `media:view` gated (the gallery page's
 /// `requirePerm`), all albums newest-first with item counts and covers —
 /// the page lists **all** albums regardless of owner (shared vault).
-async fn list_albums(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
+/// Expired public links are lazily revoked inline.
+#[utoipa::path(
+    get,
+    path = "/api/albums",
+    tag = "albums",
+    responses(
+        (status = 200, description = "All albums, newest first", body = AlbumsResponse),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `media:view`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn list_albums(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
     if !user.0.can("media:view", None) {
         return Err(ApiError::forbidden("Not allowed."));
     }
@@ -185,7 +201,20 @@ async fn list_albums(State(state): State<AppState>, user: AuthUser) -> Result<Re
 /// `POST /api/albums { title }` — `apiGuard("album:create")` → 403
 /// `"Forbidden."`; empty title → `"Give the album a title."` 400.
 /// Response `{slug}`; audit `album.create` (detail = title).
-async fn create_album(
+#[utoipa::path(
+    post,
+    path = "/api/albums",
+    tag = "albums",
+    request_body = CreateAlbumBody,
+    responses(
+        (status = 200, description = "Album created", body = AlbumCreated),
+        (status = 400, description = "Missing/empty title (non-string title → 500 in the TS route)", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `album:create`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn create_album(
     State(state): State<AppState>,
     user: AuthUser,
     req: Request,
@@ -240,7 +269,20 @@ async fn create_album(
 /// the caller, then 404 for missing or non-owned albums without
 /// `album:edit:any` (existence hiding). `itemCount` = live count,
 /// `coverSlug` = first item's slug (any state, like the page).
-async fn get_album(
+#[utoipa::path(
+    get,
+    path = "/api/albums/{slug}",
+    tag = "albums",
+    params(("slug" = String, Path, description = "Album slug")),
+    responses(
+        (status = 200, description = "Album detail", body = AlbumDto),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `media:view`", body = ErrorBody),
+        (status = 404, description = "Album missing or not owned (existence hidden)", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn get_album(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     user: AuthUser,
@@ -303,7 +345,21 @@ async fn get_album(
 /// `share:album`. Audits `album.share`/`album.unshare` (old title) and
 /// `album.rename` (new title). Response `{ok, is_public, token,
 /// expiresAt}` — the TS route's snake/camel mix, kept verbatim.
-async fn patch_album(
+#[utoipa::path(
+    patch,
+    path = "/api/albums/{slug}",
+    tag = "albums",
+    params(("slug" = String, Path, description = "Album slug")),
+    request_body = PatchAlbumBody,
+    responses(
+        (status = 200, description = "Album updated", body = PatchAlbumResponse),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `album:edit` / `share:album`", body = ErrorBody),
+        (status = 404, description = "Album not found", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn patch_album(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     user: AuthUser,
@@ -380,7 +436,20 @@ async fn patch_album(
 /// lookup (the TS order), `album:delete` scoped to the owner; media
 /// rows survive via `ON DELETE SET NULL` → back to the vault. Audit:
 /// `album.delete` (detail = title).
-async fn delete_album(
+#[utoipa::path(
+    delete,
+    path = "/api/albums/{slug}",
+    tag = "albums",
+    params(("slug" = String, Path, description = "Album slug")),
+    responses(
+        (status = 200, description = "Album deleted — media returns to the vault", body = OkBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `album:delete` on the owner", body = ErrorBody),
+        (status = 404, description = "Album not found", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn delete_album(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     user: AuthUser,
@@ -436,7 +505,25 @@ fn caption_from_name(name: &str) -> String {
 /// declared-`content-length` cap (413) before the album/`album:edit`
 /// checks, then Telegram upload into the storage chat and a media row.
 /// Sign-exempt (multipart) — CSRF-only like the TS route.
-async fn upload_album_file(
+#[utoipa::path(
+    post,
+    path = "/api/albums/{slug}/files",
+    tag = "albums",
+    params(("slug" = String, Path, description = "Album slug")),
+    request_body(content = UploadForm, content_type = "multipart/form-data"),
+    responses(
+        (status = 200, description = "File stored — new media row", body = UploadResponse),
+        (status = 400, description = "No storage chat / bad multipart / empty or non-media file / >50 MB", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `media:upload` or `album:edit`", body = ErrorBody),
+        (status = 404, description = "Album not found", body = ErrorBody),
+        (status = 413, description = "Declared Content-Length over the 50 MB cap", body = ErrorBody),
+        (status = 429, description = "Upload rate limit — `Retry-After: 60`", body = ErrorBody),
+        (status = 502, description = "Telegram rejected the upload / bot unconfigured", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn upload_album_file(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     user: AuthUser,

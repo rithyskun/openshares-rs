@@ -21,6 +21,7 @@ use openshares_core::settings::{get_setting, set_setting};
 use crate::body::{json_body, raw_body};
 use crate::error::{ApiError, Result};
 use crate::extract::AuthUser;
+use crate::openapi::{AdminAccessList, AdminAccessMut, ErrorBody};
 use crate::state::AppState;
 
 use super::{guard, query_param, valid_telegram_id};
@@ -70,20 +71,46 @@ async fn set_allowed_telegram_ids(db: &Db, ids: &BTreeSet<String>) -> CoreResult
     set_setting(db, ALLOWLIST_KEY, &joined).await
 }
 
-/// GET — `{ telegram_ids: [...ids].sort() }`.
-async fn get_access(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
+/// GET — `{ telegram_ids: [...ids].sort() }`. The DB row wins; on first
+/// read it's seeded from `ALLOWED_TELEGRAM_IDS`.
+#[utoipa::path(
+    get,
+    path = "/api/admin/access",
+    tag = "admin",
+    responses(
+        (status = 200, description = "Sorted Telegram-id allowlist", body = AdminAccessList),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `settings:manage`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn get_access(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
     guard(&state, &user.0, "settings:manage").await?;
     let ids = allowed_telegram_ids(&state.db).await?;
     Ok(Json(json!({ "telegram_ids": ids.iter().collect::<Vec<_>>() })).into_response())
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 struct AddBody {
+    /// 5–20 digits.
     telegram_id: Option<String>,
 }
 
 /// POST `{ telegram_id }` — allow a Telegram id to sign up.
-async fn add_access(
+#[utoipa::path(
+    post,
+    path = "/api/admin/access",
+    tag = "admin",
+    request_body = AddBody,
+    responses(
+        (status = 200, description = "Id added — full allowlist returned", body = AdminAccessMut),
+        (status = 400, description = "telegram_id not 5–20 digits", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `settings:manage`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn add_access(
     State(state): State<AppState>,
     user: AuthUser,
     req: Request,
@@ -110,7 +137,21 @@ async fn add_access(
 }
 
 /// DELETE `?id=<telegram_id>` — remove from the allowlist.
-async fn remove_access(
+#[utoipa::path(
+    delete,
+    path = "/api/admin/access",
+    tag = "admin",
+    params(("id" = String, Query, description = "Telegram id to remove")),
+    responses(
+        (status = 200, description = "Id removed — full allowlist returned", body = AdminAccessMut),
+        (status = 400, description = "Missing id", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `settings:manage`", body = ErrorBody),
+        (status = 404, description = "Id not on the allowlist", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn remove_access(
     State(state): State<AppState>,
     user: AuthUser,
     RawQuery(raw): RawQuery,

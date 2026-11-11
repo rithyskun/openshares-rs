@@ -27,6 +27,7 @@ use openshares_core::util::new_token;
 use crate::body::{json_body, raw_body};
 use crate::error::{ApiError, Result};
 use crate::extract::AuthUser;
+use crate::openapi::{ErrorBody, FriendsResponse, InviteBody, InviteResponse, OkBody};
 use crate::routes::albums::{bot_username, too_many_requests};
 use crate::state::AppState;
 
@@ -43,7 +44,20 @@ pub fn router() -> Router<AppState> {
 /// `GET /api/friends` — the caller's friend links only
 /// (`list_for_owner`), each row plus the display `name` the TS route
 /// computes client-shape: `"first last" || username || telegram_id`.
-async fn list_friends(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
+#[utoipa::path(
+    get,
+    path = "/api/friends",
+    tag = "friends",
+    responses(
+        (status = 200, description = "The caller's friend links", body = FriendsResponse),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn list_friends(
+    State(state): State<AppState>,
+    user: AuthUser,
+) -> Result<Response> {
     let rows = friends::list_for_owner(&state.db, user.0.id).await?;
     let friends = rows
         .iter()
@@ -87,7 +101,22 @@ fn friend_name(r: &FriendRow) -> String {
 /// (`link_codes`, purpose `friend`, 7-day expiry) and returns the
 /// `https://t.me/<bot>?start=<code>` deep link. No bot username → the
 /// TS route's 503.
-async fn create_invite(
+#[utoipa::path(
+    post,
+    path = "/api/friends",
+    tag = "friends",
+    request_body = InviteBody,
+    responses(
+        (status = 200, description = "One-time friend invite deep link", body = InviteResponse),
+        (status = 400, description = "Unknown action", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `friend:invite`", body = ErrorBody),
+        (status = 429, description = "Rate limited — `Retry-After: 60`", body = ErrorBody),
+        (status = 503, description = "Bot is offline / BOT_TOKEN unset", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn create_invite(
     State(state): State<AppState>,
     user: AuthUser,
     req: Request,
@@ -150,7 +179,21 @@ fn parse_link_id(raw: &str) -> Option<i64> {
 /// `DELETE /api/friends/{id}` — `apiGuard("friend:remove")`, signed
 /// body (content unused), id parse (`"Bad id."` 400), owner-scoped
 /// delete (`"Not found."` 404 when the row isn't the caller's).
-async fn remove_friend(
+#[utoipa::path(
+    delete,
+    path = "/api/friends/{id}",
+    tag = "friends",
+    params(("id" = i64, Path, description = "`friend_links` row id")),
+    responses(
+        (status = 200, description = "Friend link removed", body = OkBody),
+        (status = 400, description = "Bad id", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `friend:remove`", body = ErrorBody),
+        (status = 404, description = "Link not found / not the caller's", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn remove_friend(
     State(state): State<AppState>,
     Path(id): Path<String>,
     user: AuthUser,

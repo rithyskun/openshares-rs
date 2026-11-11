@@ -19,6 +19,7 @@ use openshares_core::crypto::signing::signing_key_for;
 
 use crate::error::Result;
 use crate::extract::{MaybeUser, SESSION_COOKIE, cookie_value};
+use crate::openapi::{ErrorBody, MeResponse};
 use crate::state::AppState;
 
 /// Route table — merged by `routes::api_router` under `/api`.
@@ -28,7 +29,17 @@ pub fn router() -> Router<AppState> {
 
 /// `Response.json({id, name, email, telegram_id, permissions, signingKey})`
 /// — `signingKey` is `null` when `REQUEST_SIGNING_SECRET` is unset.
-async fn me(
+#[utoipa::path(
+    get,
+    path = "/api/me",
+    tag = "account",
+    responses(
+        (status = 200, description = "Signed-in identity + sorted permission keys", body = MeResponse),
+        (status = 401, description = "No session (`UNAUTHENTICATED`) or dead cookie (`TOKEN_EXPIRED` + `x-session-expired` header)", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn me(
     State(_state): State<AppState>,
     MaybeUser(user): MaybeUser,
     headers: HeaderMap,

@@ -13,6 +13,7 @@ use serde_json::json;
 use openshares_core::settings::site_name;
 
 use crate::error::Result;
+use crate::openapi::MetaResponse;
 use crate::routes::albums::bot_username;
 use crate::state::AppState;
 
@@ -21,10 +22,22 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/meta", get(meta))
 }
 
-async fn meta(State(state): State<AppState>) -> Result<Response> {
+/// `{siteName, botUsername, appUrl}` — public; the web layer caches 60s.
+#[utoipa::path(
+    get,
+    path = "/api/meta",
+    tag = "meta",
+    responses(
+        (status = 200, description = "Instance metadata", body = MetaResponse),
+    ),
+    security(())
+)]
+pub(crate) async fn meta(State(state): State<AppState>) -> Result<Response> {
+    // Independent lookups — on cold caches this saves a remote RTT.
+    let (site, bot) = tokio::join!(site_name(&state.db), bot_username(&state));
     Ok(Json(json!({
-        "siteName": site_name(&state.db).await?,
-        "botUsername": bot_username(&state).await,
+        "siteName": site?,
+        "botUsername": bot,
         "appUrl": state.config.app_url,
     }))
     .into_response())

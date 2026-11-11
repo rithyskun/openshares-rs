@@ -37,6 +37,7 @@ use openshares_core::db::repos::users;
 use crate::body::json_body;
 use crate::error::{ApiError, Result};
 use crate::extract::{SESSION_COOKIE, cookie_value};
+use crate::openapi::{ErrorBody, LoginResponse, OkBody, RsaKeyResponse};
 use crate::state::AppState;
 
 /// Route table — merged by `routes::api_router` under `/api`.
@@ -51,10 +52,13 @@ pub fn router() -> Router<AppState> {
 
 /// `parseJsonBody<{ email?, password?, payload? }>` — unknown fields
 /// ignored, garbage tolerated (a non-object body yields the defaults).
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 struct LoginBody {
+    /// Plaintext — only while `rsaEnabled()` is false.
     email: Option<String>,
     password: Option<String>,
+    /// Hybrid-envelope ciphertext carrying `{email, password, ts}` —
+    /// mandatory once `RSA_*` is configured.
     payload: Option<String>,
 }
 
@@ -67,7 +71,26 @@ struct LoginInner {
     ts: Option<f64>,
 }
 
-async fn login(
+/// `POST /api/auth/login` — plaintext `{email, password}` while RSA is
+/// unconfigured; `{payload}` (envelope-encrypted credentials, ±5 min
+/// freshness) once it is. CSRF-checked, sign-exempt.
+#[utoipa::path(
+    post,
+    path = "/api/auth/login",
+    tag = "auth",
+    request_body = LoginBody,
+    responses(
+        (status = 200, description = "Signed in", body = LoginResponse, headers(
+            ("set-cookie" = String, description = "`os_session=<jwt>`; HttpOnly; SameSite=Lax; Max-Age=86400"),
+        )),
+        (status = 400, description = "Missing credentials / undecryptable or stale payload", body = ErrorBody),
+        (status = 401, description = "Wrong email or password", body = ErrorBody),
+        (status = 429, description = "Login rate limit — `Retry-After: 60`", body = ErrorBody),
+        (status = 503, description = "Authentication is not configured", body = ErrorBody),
+    ),
+    security(())
+)]
+pub(crate) async fn login(
     State(state): State<AppState>,
     headers: HeaderMap,
     uri: Uri,
@@ -157,7 +180,18 @@ fn login_key(headers: &HeaderMap) -> String {
 
 /// `destroySession` — peek the (possibly expired) JWT, delete the
 /// session row it names, and expire the cookie unconditionally.
-async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Response> {
+#[utoipa::path(
+    post,
+    path = "/api/auth/logout",
+    tag = "auth",
+    responses(
+        (status = 200, description = "Session destroyed", body = OkBody, headers(
+            ("set-cookie" = String, description = "`os_session=`; Max-Age=0 (expired)"),
+        )),
+    ),
+    security(())
+)]
+pub(crate) async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Response> {
     let cookie_header = headers
         .get(header::COOKIE)
         .and_then(|v| v.to_str().ok())
@@ -173,7 +207,16 @@ async fn logout(State(state): State<AppState>, headers: HeaderMap) -> Result<Res
 /// `{enabled, publicKey, keyId}` — the key the login/password forms
 /// encrypt credentials with. `{enabled: false}` when RSA isn't
 /// configured so dev setups can still log in over plaintext.
-async fn rsa_key() -> Json<serde_json::Value> {
+#[utoipa::path(
+    get,
+    path = "/api/auth/rsa-key",
+    tag = "auth",
+    responses(
+        (status = 200, description = "RSA public key for credential encryption", body = RsaKeyResponse),
+    ),
+    security(())
+)]
+pub(crate) async fn rsa_key() -> Json<serde_json::Value> {
     match (rsa_enabled(), rsa_public_key_pem()) {
         (true, Some(public_key)) => Json(json!({
             "enabled": true,

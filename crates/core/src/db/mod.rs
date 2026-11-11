@@ -152,12 +152,11 @@ impl Db {
         let path = local_path(url);
 
         // SQLite won't create missing parent directories for us.
-        if path != ":memory:" {
-            if let Some(parent) = Path::new(path).parent() {
-                if !parent.as_os_str().is_empty() {
-                    std::fs::create_dir_all(parent)?;
-                }
-            }
+        if path != ":memory:"
+            && let Some(parent) = Path::new(path).parent()
+            && !parent.as_os_str().is_empty()
+        {
+            std::fs::create_dir_all(parent)?;
         }
 
         let database = Builder::new_local(path).build().await?;
@@ -227,6 +226,12 @@ impl Db {
         });
 
         Ok(db)
+    }
+
+    /// Whether this `Db` talks to remote Turso (hrana) rather than a
+    /// local SQLite file — dev-only bootstrap (seed) gates on it.
+    pub fn is_remote(&self) -> bool {
+        self.remote
     }
 
     /// Pick the backend from config — Turso when `TURSO_DB_URL` is set

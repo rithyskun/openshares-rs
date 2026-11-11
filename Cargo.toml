@@ -2,10 +2,17 @@
 resolver = "2"
 members = ["crates/*"]
 
+# Debug builds leave dependencies (rustls, serde, axum, scrypt — the bulk of
+# per-request CPU) unoptimized, which made `cargo run` dev unfairly slow vs
+# the JIT'd TS stack. Optimizing deps only keeps workspace crates fast to
+# rebuild; first build after this pays the one-time cost.
+[profile.dev.package."*"]
+opt-level = 2
+
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.99.1"
 license = "MIT"
 authors = ["Rithy Skun <rithy.skun@outlook.com>"]
 
@@ -48,6 +55,11 @@ base64 = "0.22"
 
 # Tests — temp cache dirs
 tempfile = "3"
+
+# OpenAPI docs — utoipa 6 (MSRV 1.88) + Swagger UI, mounted only when
+# SWAGGER_UI=1 (see server main.rs).
+utoipa = "6"
+utoipa-swagger-ui = { version = "10", features = ["axum"] }
 
 # Phase 6 crypto — used by crates/core/src/crypto/*
 sha2 = "0.11"

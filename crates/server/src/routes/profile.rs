@@ -37,6 +37,7 @@ use openshares_core::util::new_token;
 use crate::body::raw_body;
 use crate::error::{ApiError, Result};
 use crate::extract::AuthUser;
+use crate::openapi::{ErrorBody, LinkCreated, LinkState, OkBody};
 use crate::state::AppState;
 
 /// Route table — merged by `routes::api_router` under `/api`.
@@ -49,10 +50,14 @@ pub fn router() -> Router<AppState> {
 /* ------------------------- POST /profile/password ------------------------- */
 
 /// `parseJsonBody<{ current?, next?, payload? }>`.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 struct PasswordBody {
+    /// Plaintext — only while `rsaEnabled()` is false.
     current: Option<String>,
+    /// New password (≥ 8 UTF-16 code units).
     next: Option<String>,
+    /// Hybrid-envelope ciphertext `{current, next, ts}` — mandatory
+    /// once `RSA_*` is configured.
     payload: Option<String>,
 }
 
@@ -64,7 +69,23 @@ struct PasswordInner {
     ts: Option<f64>,
 }
 
-async fn change_password(
+/// `POST /api/profile/password` — HMAC-signed body; envelope-encrypted
+/// when RSA is configured. Rotating the password signs out every other
+/// session.
+#[utoipa::path(
+    post,
+    path = "/api/profile/password",
+    tag = "account",
+    request_body = PasswordBody,
+    responses(
+        (status = 200, description = "Password changed — other sessions revoked", body = OkBody),
+        (status = 400, description = "Wrong current / short next / undecryptable payload", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 429, description = "Rate limited — `Retry-After: 60`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn change_password(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     req: Request,
@@ -139,7 +160,20 @@ async fn password_fields(body: PasswordBody) -> Result<(String, String)> {
 
 /// `{telegram_id, bot_profile}` — the current Telegram connection state:
 /// the linked account's `@username`, else its `first_name`, else `null`.
-async fn link_state(State(state): State<AppState>, AuthUser(user): AuthUser) -> Result<Response> {
+#[utoipa::path(
+    get,
+    path = "/api/profile/link",
+    tag = "account",
+    responses(
+        (status = 200, description = "Telegram link state", body = LinkState),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn link_state(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+) -> Result<Response> {
     let tg = match &user.telegram_id {
         Some(id) => telegram_users::get_by_id(&state.db, id).await?,
         None => None,
@@ -163,7 +197,23 @@ async fn link_state(State(state): State<AppState>, AuthUser(user): AuthUser) -> 
 /// Mint a one-time `/link CODE` — 409 when a Telegram account is already
 /// linked, 503 when the bot identity can't be resolved (mirrors
 /// `getBotUsername().catch(() => null)` → the offline error).
-async fn link_create(
+/// `POST /api/profile/link` — mints a one-time `/link CODE` (signed
+/// empty body). 409 when a Telegram account is already linked, 503 when
+/// the bot identity can't be resolved.
+#[utoipa::path(
+    post,
+    path = "/api/profile/link",
+    tag = "account",
+    responses(
+        (status = 200, description = "One-time link code + bot deep link", body = LinkCreated),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 409, description = "Telegram account already linked", body = ErrorBody),
+        (status = 429, description = "Rate limited — `Retry-After: 60`", body = ErrorBody),
+        (status = 503, description = "Bot is offline / BOT_TOKEN unset", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn link_create(
     State(state): State<AppState>,
     AuthUser(user): AuthUser,
     req: Request,

@@ -30,6 +30,7 @@ use openshares_core::error::Result as CoreResult;
 use crate::body::{json_body, raw_body};
 use crate::error::{ApiError, Result};
 use crate::extract::AuthUser;
+use crate::openapi::{ErrorBody, OkBody, PatchUserBody, UserCreated, UsersResponse};
 use crate::state::AppState;
 
 use super::{guard, js_id, js_string, query_param, too_many_requests, valid_email};
@@ -40,7 +41,7 @@ pub(super) fn router() -> Router<AppState> {
         .route("/admin/users/{id}", patch(patch_user))
         .route(
             "/admin/users/{id}/roles",
-            post(assign_role).put(assign_role).delete(remove_role),
+            post(assign_role).put(assign_role_put).delete(remove_role),
         )
 }
 
@@ -55,7 +56,18 @@ async fn violates_last_admin(db: &Db, user_id: i64) -> CoreResult<bool> {
 /// GET — `{ users: [...roles: string[]], roles: [{id, name, builtin}] }`.
 /// The roles list is `ORDER BY name` here (the roles route uses
 /// `builtin DESC, name`).
-async fn list_users(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
+#[utoipa::path(
+    get,
+    path = "/api/admin/users",
+    tag = "admin",
+    responses(
+        (status = 200, description = "All users with role names + the role list", body = UsersResponse),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `admin:access`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn list_users(State(state): State<AppState>, user: AuthUser) -> Result<Response> {
     guard(&state, &user.0, "admin:access").await?;
 
     let all = users_repo::list_all(&state.db).await?;
@@ -89,17 +101,36 @@ async fn list_users(State(state): State<AppState>, user: AuthUser) -> Result<Res
     Ok(Json(json!({ "users": users_json, "roles": roles_json })).into_response())
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 struct NewUserBody {
+    /// Display name (≤200 chars) — required.
     name: Option<String>,
+    /// Optional; required when `password` is set.
     email: Option<String>,
+    /// ≥8 chars; empty/absent → sign-in via Telegram only.
     password: Option<String>,
+    /// Role names to assign (≤20).
     roles: Option<Value>,
 }
 
 /// POST `{ name, email?, password?, roles? }` — create an account.
 /// `API_LIMITER`-rated like the TS route (`admin-users:<actor>`).
-async fn create_user(
+#[utoipa::path(
+    post,
+    path = "/api/admin/users",
+    tag = "admin",
+    request_body = NewUserBody,
+    responses(
+        (status = 200, description = "User created", body = UserCreated),
+        (status = 400, description = "Missing name / invalid email / password <8 chars / password without email", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `user:manage`", body = ErrorBody),
+        (status = 409, description = "Email already in use", body = ErrorBody),
+        (status = 429, description = "Rate limited — `Retry-After: 60`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn create_user(
     State(state): State<AppState>,
     user: AuthUser,
     req: Request,
@@ -137,10 +168,10 @@ async fn create_user(
     if name.is_empty() {
         return Err(ApiError::bad_request("Name is required."));
     }
-    if let Some(e) = &email {
-        if !valid_email(e) {
-            return Err(ApiError::bad_request("Invalid email address."));
-        }
+    if let Some(e) = &email
+        && !valid_email(e)
+    {
+        return Err(ApiError::bad_request("Invalid email address."));
     }
     if !password.is_empty() && email.is_none() {
         return Err(ApiError::bad_request(
@@ -152,13 +183,13 @@ async fn create_user(
             "Password must be at least 8 characters.",
         ));
     }
-    if let Some(e) = &email {
-        if users_repo::email_taken(&state.db, e, None).await? {
-            return Err(ApiError::new(
-                StatusCode::CONFLICT,
-                "That email is already in use.",
-            ));
-        }
+    if let Some(e) = &email
+        && users_repo::email_taken(&state.db, e, None).await?
+    {
+        return Err(ApiError::new(
+            StatusCode::CONFLICT,
+            "That email is already in use.",
+        ));
     }
 
     let password_hash = if password.is_empty() {
@@ -208,7 +239,27 @@ async fn create_user(
 /// the profile (a password reset also kills sessions). Profile fields
 /// win when both shapes are present, matching the TS `!== undefined`
 /// key-presence checks.
-async fn patch_user(
+/// `PATCH /admin/users/{id}` — `{ disabled: boolean }` suspends or
+/// unsuspends (killing sessions); `{ name?, email?, password? }` edits
+/// the profile (a password reset also kills sessions). Profile fields
+/// win when both shapes are present.
+#[utoipa::path(
+    patch,
+    path = "/api/admin/users/{id}",
+    tag = "admin",
+    params(("id" = i64, Path, description = "User id")),
+    request_body = PatchUserBody,
+    responses(
+        (status = 200, description = "User updated / suspended / unsuspended", body = OkBody),
+        (status = 400, description = "Bad id / empty name / invalid email / password <8 chars / suspending yourself", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `user:manage`", body = ErrorBody),
+        (status = 404, description = "User not found", body = ErrorBody),
+        (status = 409, description = "Email in use / would orphan the vault without an admin", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn patch_user(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
@@ -351,14 +402,30 @@ async fn patch_user_profile(
     Ok(Json(json!({ "ok": true })).into_response())
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, utoipa::ToSchema)]
 struct AssignBody {
+    /// Role name.
     role: Option<String>,
 }
 
 /// POST (or PUT) `/admin/users/{id}/roles` `{ role }` —
 /// `INSERT OR IGNORE INTO user_roles`.
-async fn assign_role(
+#[utoipa::path(
+    post,
+    path = "/api/admin/users/{id}/roles",
+    tag = "admin",
+    params(("id" = i64, Path, description = "User id")),
+    request_body = AssignBody,
+    responses(
+        (status = 200, description = "Role assigned", body = OkBody),
+        (status = 400, description = "Bad id / missing or unknown role", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `user:manage`", body = ErrorBody),
+        (status = 404, description = "User not found", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn assign_role(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,
@@ -392,11 +459,54 @@ async fn assign_role(
     Ok(Json(json!({ "ok": true })).into_response())
 }
 
+/// PUT alias of [`assign_role`] (the TS route accepted both) — a
+/// separate fn so each gets its own `#[utoipa::path]` operation.
+#[utoipa::path(
+    put,
+    path = "/api/admin/users/{id}/roles",
+    tag = "admin",
+    params(("id" = i64, Path, description = "User id")),
+    request_body = AssignBody,
+    responses(
+        (status = 200, description = "Role assigned (PUT aliases POST)", body = OkBody),
+        (status = 400, description = "Bad id / missing or unknown role", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `user:manage`", body = ErrorBody),
+        (status = 404, description = "User not found", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn assign_role_put(
+    state: State<AppState>,
+    user: AuthUser,
+    id: Path<String>,
+    req: Request,
+) -> Result<Response> {
+    assign_role(state, user, id, req).await
+}
+
 /// DELETE `/admin/users/{id}/roles?role=<name>` — remove a role,
 /// last-admin guarded. Like the TS route, the target user isn't
 /// loaded — removing a role from a nonexistent id is a harmless no-op
-/// after the invariant check.
-async fn remove_role(
+/// after the invariant check. Signed empty body.
+#[utoipa::path(
+    delete,
+    path = "/api/admin/users/{id}/roles",
+    tag = "admin",
+    params(
+        ("id" = i64, Path, description = "User id"),
+        ("role" = String, Query, description = "Role name to remove"),
+    ),
+    responses(
+        (status = 200, description = "Role removed", body = OkBody),
+        (status = 400, description = "Bad id / missing or unknown role", body = ErrorBody),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `user:manage`", body = ErrorBody),
+        (status = 409, description = "Would orphan the vault without an admin", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn remove_role(
     State(state): State<AppState>,
     user: AuthUser,
     Path(id): Path<String>,

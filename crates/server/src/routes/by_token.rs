@@ -19,6 +19,7 @@ use axum::{Router, routing::get};
 use openshares_core::db::repos::shares;
 
 use crate::error::{ApiError, Result};
+use crate::openapi::ErrorBody;
 use crate::state::AppState;
 
 /// Route table — merged by `routes::public_router` under `/api`.
@@ -26,7 +27,22 @@ pub fn router() -> Router<AppState> {
     Router::new().route("/media/by-token/{token}", get(by_token))
 }
 
-async fn by_token(
+/// 302 → `/api/media/{slug}?token=<token>` — original query params
+/// (`download`, `thumb`) forwarded, `token` appended last.
+#[utoipa::path(
+    get,
+    path = "/api/media/by-token/{token}",
+    tag = "public",
+    params(
+        ("token" = String, Path, description = "Live 'link' share token"),
+    ),
+    responses(
+        (status = 302, description = "Redirect to the streaming route (token re-validated there)", headers(("Location" = String, description = "/api/media/{slug}?…&token={token}"))),
+        (status = 404, description = "Unknown or expired token", body = ErrorBody),
+    ),
+    security(())
+)]
+pub(crate) async fn by_token(
     State(state): State<AppState>,
     Path(token): Path<String>,
     RawQuery(raw_query): RawQuery,

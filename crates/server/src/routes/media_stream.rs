@@ -31,6 +31,7 @@ use openshares_core::models::Media;
 use crate::body::{json_body, raw_body};
 use crate::error::{ApiError, Result};
 use crate::extract::MaybeUser;
+use crate::openapi::{ErrorBody, OkBody, PatchMediaBody, PatchMediaResponse};
 use crate::state::AppState;
 
 /// Route table — merged by `routes::public_router` under `/api`.
@@ -44,7 +45,7 @@ pub fn router() -> Router<AppState> {
 }
 
 #[derive(Debug, Deserialize)]
-struct MediaStreamQuery {
+pub(crate) struct MediaStreamQuery {
     token: Option<String>,
     thumb: Option<String>,
     download: Option<String>,
@@ -59,10 +60,10 @@ async fn authorized(
     token: Option<&str>,
     user: Option<&SessionUser>,
 ) -> Result<bool> {
-    if let Some(u) = user {
-        if media.owner_user_id == Some(u.id) || u.can("media:view", None) {
-            return Ok(true);
-        }
+    if let Some(u) = user
+        && (media.owner_user_id == Some(u.id) || u.can("media:view", None))
+    {
+        return Ok(true);
     }
     if let Some(token) = token {
         if shares::live_link_exists(&state.db, media.id, token).await? {
@@ -74,7 +75,33 @@ async fn authorized(
     Ok(false)
 }
 
-async fn get_media(
+/// `GET /api/media/{slug}` — the streaming route. Authorized by session
+/// (owner or `media:view`) OR a live `?token=` share/public-album token.
+/// `Range` requests → 206; `?thumb=1` serves the thumb; `?download=1`
+/// adds a `Content-Disposition` save-as filename.
+#[utoipa::path(
+    get,
+    path = "/api/media/{slug}",
+    tag = "media",
+    params(
+        ("slug" = String, Path, description = "Media slug"),
+        ("token" = Option<String>, Query, description = "'link' share token or public-album token"),
+        ("thumb" = Option<String>, Query, description = "`1` → serve the smaller thumb when present"),
+        ("download" = Option<String>, Query, description = "`1` → Content-Disposition attachment"),
+        ("Range" = Option<String>, Header, description = "Byte range — `bytes=a-b` → 206 partial"),
+    ),
+    responses(
+        (status = 200, description = "Full media stream", body = Vec<u8>, content_type = "application/octet-stream"),
+        (status = 206, description = "Partial content (Range honored)", body = Vec<u8>, content_type = "application/octet-stream"),
+        (status = 401, description = "Not signed in (no session and no token)", body = ErrorBody),
+        (status = 403, description = "Not allowed — no session/token grant", body = ErrorBody),
+        (status = 404, description = "Media not found", body = ErrorBody),
+        (status = 410, description = "Original Telegram file unreachable (self-heals `missing`)", body = ErrorBody),
+        (status = 415, description = "File too big for Bot API download (`telegram-only`)", body = ErrorBody),
+    ),
+    security(("session_cookie" = []), ())
+)]
+pub(crate) async fn get_media(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     Query(query): Query<MediaStreamQuery>,
@@ -204,8 +231,21 @@ fn caption_from_body(body: &Map<String, Value>) -> Result<Option<String>> {
 
 /// `PATCH /api/media/{slug} { caption }` — `media:edit` scoped to the
 /// item's owner, then a signed body. Response `{ok, caption}` (null
-/// when cleared). Audit: `media.caption.edit`.
-async fn patch_media(
+/// when cleared). Audit: `media.caption.edit`. All failure modes
+/// collapse to the same 403 (no existence leak).
+#[utoipa::path(
+    patch,
+    path = "/api/media/{slug}",
+    tag = "media",
+    params(("slug" = String, Path, description = "Media slug")),
+    request_body = PatchMediaBody,
+    responses(
+        (status = 200, description = "Caption updated", body = PatchMediaResponse),
+        (status = 403, description = "No session / missing media / denied `media:edit`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn patch_media(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     maybe_user: MaybeUser,
@@ -237,8 +277,19 @@ async fn patch_media(
 /// `DELETE /api/media/{slug}` — `media:delete` scoped to the owner, a
 /// signed body (content unused — `verifySignedBody` only), then a hard
 /// delete (`media::delete_by_id`); the file itself stays in Telegram.
-/// Audit: `media.delete`.
-async fn delete_media(
+/// Audit: `media.delete`. All failure modes collapse to the same 403.
+#[utoipa::path(
+    delete,
+    path = "/api/media/{slug}",
+    tag = "media",
+    params(("slug" = String, Path, description = "Media slug")),
+    responses(
+        (status = 200, description = "Media row deleted", body = OkBody),
+        (status = 403, description = "No session / missing media / denied `media:delete`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn delete_media(
     State(state): State<AppState>,
     Path(slug): Path<String>,
     maybe_user: MaybeUser,

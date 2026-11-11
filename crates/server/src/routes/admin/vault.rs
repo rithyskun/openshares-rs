@@ -12,6 +12,7 @@ use openshares_core::db::repos::{albums, media, shares, users};
 
 use crate::error::Result;
 use crate::extract::AuthUser;
+use crate::openapi::{ErrorBody, VaultStats};
 use crate::routes::admin::guard;
 use crate::state::AppState;
 
@@ -26,7 +27,21 @@ pub fn router() -> Router<AppState> {
 /// `VaultStats` — `{media:{count,bytes}, byKind, byAvailability,
 /// albums:{count,publicCount}, shares:{count,activeLinks},
 /// users:{count,active}, topOwners:[{name,n,bytes}]}`.
-async fn vault(State(state): State<AppState>, AuthUser(user): AuthUser) -> Result<Response> {
+#[utoipa::path(
+    get,
+    path = "/api/admin/vault",
+    tag = "admin",
+    responses(
+        (status = 200, description = "Vault DB index stats", body = VaultStats),
+        (status = 401, description = "Not signed in", body = ErrorBody),
+        (status = 403, description = "Missing `admin:access`", body = ErrorBody),
+    ),
+    security(("session_cookie" = []))
+)]
+pub(crate) async fn vault(
+    State(state): State<AppState>,
+    AuthUser(user): AuthUser,
+) -> Result<Response> {
     guard(&state, &user, "admin:access").await?;
 
     // Seven independent aggregate queries — run them concurrently so the

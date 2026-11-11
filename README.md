@@ -30,6 +30,9 @@ rustup default stable
 
 cp .env.example .env             # set BOT_TOKEN for the bot binary
 ./dev.sh                         # API :8080 + web :3000 together (Ctrl-C stops both)
+DB=local ./dev.sh                # same, but local SQLite (data/dev.db) instead
+                                 # of remote Turso — ~0 ms queries, seeds
+                                 # dev@localhost/devpassword123 on first boot
 
 # or individually:
 cargo run -p openshares-server   # API on :8080 (migrations auto-apply)
@@ -159,3 +162,8 @@ the API, or open the Next dev server directly on :3000).
 
 Host on Fly.io / Railway / a VPS / Cloud Run — NOT Vercel serverless
 (no persistent bot poller, ephemeral fs, response limits).
+
+**Free-tier deploy (recommended)**: Oracle Cloud Always Free Ampere A1
+ARM64 VM + Cloudflare Tunnel — `docs/oracle-deploy.md` covers image
+build/rsync, the `tunnel` compose profile, `.env`, and webhook setup.
+`MEDIA_CACHE_BACKEND=s3` + `R2_*` puts the blob cache on Cloudflare R2.

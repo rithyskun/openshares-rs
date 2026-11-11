@@ -2,7 +2,9 @@
 # Dev launcher — runs the Rust API (:8080) and the Next dev server (:3000)
 # together, and tears both down on exit (Ctrl-C or either process dying).
 #
-#   ./dev.sh            → API :8080 + web :3000
+#   ./dev.sh            → API :8080 + web :3000, db = remote Turso (.env)
+#   DB=local ./dev.sh   → local SQLite (data/dev.db) — zero network RTT,
+#                         seeds dev@localhost/devpassword123 on first boot
 #
 # Both entry points work once running:
 #   http://localhost:3000  → Next dev directly (rewrites /api/* → :8080)
@@ -13,8 +15,24 @@ cd "$(dirname "$0")"
 # brew's rustup is keg-only — make cargo visible for this script.
 export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
 
+# Local-DB mode: export-empty TURSO_* beats the .env values (config env()
+# is trimmed-or-undefined, and dotenvy never overrides real env vars), so
+# the API falls back to DATABASE_URL without touching .env.
+if [ "${DB:-remote}" = "local" ]; then
+  export TURSO_DB_URL= TURSO_AUTH_TOKEN=
+  export DATABASE_URL="${DATABASE_URL:-sqlite://data/dev.db}"
+  export DEV_SEED=1
+  echo "▸ DB=local → $DATABASE_URL (TURSO_* overridden for this run)"
+fi
+
 # Prod-parity gateway: axum proxies non-/api page traffic to Next.
 export WEB_ORIGIN="${WEB_ORIGIN:-http://127.0.0.1:3000}"
+
+# Swagger UI on for dev (override with SWAGGER_UI= to disable).
+# SWAGGER_AUTH is the Basic-auth gate — local-only default, override
+# with a real pair in .env before exposing anywhere.
+export SWAGGER_UI="${SWAGGER_UI:-1}"
+export SWAGGER_AUTH="${SWAGGER_AUTH:-docs:dev}"
 
 # Free the dev ports — a previous run's children can linger holding them.
 # TERM first, escalate to KILL if the socket doesn't release. (Must
