@@ -5,6 +5,9 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
 [dependencies]
 openshares-core = { path = "../core" }
 tokio.workspace = true
@@ -26,3 +29,5 @@ utoipa-swagger-ui.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true
+# `testing` unlocks core's local-SQLite test harness (`Db::connect`).
+openshares-core = { path = "../core", features = ["testing"] }

@@ -1,0 +1,11 @@
+{
+  "name": "openshares-rs",
+  "private": true,
+  "description": "Root manifest — exists for husky git hooks only. The app code lives in crates/ (Rust) and web/ (Next.js).",
+  "scripts": {
+    "prepare": "husky"
+  },
+  "devDependencies": {
+    "husky": "^9.1.7"
+  }
+}

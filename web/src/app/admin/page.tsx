@@ -1,6 +1,7 @@
 import { apiServerFetch, apiServerJson, requireApiPerm } from "@/lib/api-server";
 import { siteName } from "@/lib/meta";
 import { AdminConsole, type AdminUser, type RoleWithPerms, type PermGroup, type AuditRow, type CacheInfo, type VaultStats } from "./admin-console";
+import { ADMIN_TABS, type AdminTab } from "./tabs";
 
 export const dynamic = "force-dynamic";
 
@@ -27,20 +28,78 @@ const EMPTY_VAULT: VaultStats = {
   topOwners: [],
 };
 
-export default async function AdminPage() {
+/**
+ * Tab-scoped fetch — `/admin?tab=<t>` loads only the calls the active
+ * tab renders. `users` also needs `roles` (its drawer's role toggles)
+ * and `roles` needs `permGroups` (its drawer's permission checklist);
+ * every other tab is a single call.
+ */
+export default async function AdminPage({
+  searchParams,
+}: {
+  searchParams: Promise<{ tab?: string }>;
+}) {
   await requireApiPerm("admin:access");
+  const { tab: raw } = await searchParams;
+  const tab = (ADMIN_TABS as readonly string[]).includes(raw ?? "")
+    ? (raw as AdminTab)
+    : "users";
 
-  const [usersBody, rolesBody, permsBody, activityBody, allowlistBody, cache, vault, name] =
-    await Promise.all([
-      apiServerJson<{ users: AdminUser[] }>("/api/admin/users"),
-      apiServerJson<{ roles: RoleWithPerms[] }>("/api/admin/roles"),
-      apiServerJson<{ permissions: PermGroup[] }>("/api/admin/permissions"),
-      apiServerJson<{ activity: AuditRow[] }>("/api/admin/activity"),
-      adminJson<{ telegram_ids: string[] }>("/api/admin/access", { telegram_ids: [] }),
-      adminJson<CacheInfo>("/api/admin/cache", { ttlDays: 7, last: null }),
-      adminJson<VaultStats>("/api/admin/vault", EMPTY_VAULT),
-      siteName(),
-    ]);
+  const data: {
+    users?: AdminUser[];
+    roles?: RoleWithPerms[];
+    permGroups?: PermGroup[];
+    allowlist?: string[];
+    activity?: AuditRow[];
+    cache?: CacheInfo;
+    vault?: VaultStats;
+    siteName?: string;
+  } = {};
+
+  switch (tab) {
+    case "users": {
+      const [usersBody, rolesBody] = await Promise.all([
+        apiServerJson<{ users: AdminUser[] }>("/api/admin/users"),
+        apiServerJson<{ roles: RoleWithPerms[] }>("/api/admin/roles"),
+      ]);
+      data.users = usersBody.users;
+      data.roles = rolesBody.roles;
+      break;
+    }
+    case "roles": {
+      const [rolesBody, permsBody] = await Promise.all([
+        apiServerJson<{ roles: RoleWithPerms[] }>("/api/admin/roles"),
+        apiServerJson<{ permissions: PermGroup[] }>("/api/admin/permissions"),
+      ]);
+      data.roles = rolesBody.roles;
+      data.permGroups = permsBody.permissions;
+      break;
+    }
+    case "permissions":
+      data.permGroups = (
+        await apiServerJson<{ permissions: PermGroup[] }>("/api/admin/permissions")
+      ).permissions;
+      break;
+    case "access":
+      [data.allowlist, data.siteName] = await Promise.all([
+        adminJson<{ telegram_ids: string[] }>("/api/admin/access", { telegram_ids: [] }).then(
+          (b) => b.telegram_ids
+        ),
+        siteName(),
+      ]);
+      break;
+    case "vault":
+      data.vault = await adminJson<VaultStats>("/api/admin/vault", EMPTY_VAULT);
+      break;
+    case "storage":
+      data.cache = await adminJson<CacheInfo>("/api/admin/cache", { ttlDays: 7, last: null });
+      break;
+    case "activity":
+      data.activity = (
+        await apiServerJson<{ activity: AuditRow[] }>("/api/admin/activity")
+      ).activity;
+      break;
+  }
 
   return (
     <div className="space-y-6">
@@ -51,14 +110,15 @@ export default async function AdminPage() {
         </p>
       </header>
       <AdminConsole
-        users={usersBody.users}
-        roles={rolesBody.roles}
-        permGroups={permsBody.permissions}
-        allowlist={allowlistBody.telegram_ids}
-        activity={activityBody.activity}
-        cache={cache}
-        vault={vault}
-        siteName={name}
+        tab={tab}
+        users={data.users}
+        roles={data.roles}
+        permGroups={data.permGroups}
+        allowlist={data.allowlist}
+        activity={data.activity}
+        cache={data.cache}
+        vault={data.vault}
+        siteName={data.siteName}
       />
     </div>
   );

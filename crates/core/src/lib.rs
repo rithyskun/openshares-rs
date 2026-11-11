@@ -19,6 +19,9 @@
 //! This crate intentionally has NO web-framework dependency — `server`
 //! (axum) and `bot` (long-poll) are thin binaries over it.
 
+// Workspace lints deny unwrap/expect in shipped code; tests may unwrap.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod audit;
 pub mod bot;
 pub mod config;

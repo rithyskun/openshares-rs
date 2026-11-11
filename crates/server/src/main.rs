@@ -6,8 +6,11 @@
 //! wrap it in the `middleware.ts`-ordered gateway stack via
 //! `middleware::apply`.
 
+// Workspace lints deny unwrap/expect in shipped code; tests may unwrap.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 use axum::{Router, routing::get};
-use openshares_server::{middleware, openapi, proxy, routes, seed, state::AppState};
+use openshares_server::{middleware, openapi, proxy, routes, state::AppState};
 use std::net::SocketAddr;
 use tokio::net::TcpListener;
 use tracing_subscriber::EnvFilter;
@@ -22,15 +25,6 @@ async fn main() -> anyhow::Result<()> {
 
     let state = AppState::from_env().await?;
     state.db.migrate().await?;
-
-    // Dev bootstrap (`DB=local ./dev.sh`) — hard-gated inside the seed.
-    if std::env::var("DEV_SEED")
-        .ok()
-        .is_some_and(|v| !v.trim().is_empty())
-        && seed::ensure_dev_admin(&state.db).await?
-    {
-        tracing::info!(email = seed::DEV_EMAIL, "seeded dev admin (local db)");
-    }
 
     let mut app = Router::new()
         .route("/healthz", get(healthz))

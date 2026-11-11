@@ -10,6 +10,9 @@
 //! - `openapi`    — `ApiDoc` + doc DTOs (mounted only when `SWAGGER_UI`)
 //! - `routes`     — `/api/*` routers (public + authenticated)
 
+// Workspace lints deny unwrap/expect in shipped code; tests may unwrap.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 pub mod body;
 pub mod error;
 pub mod extract;
@@ -18,5 +21,4 @@ pub mod middleware;
 pub mod openapi;
 pub mod proxy;
 pub mod routes;
-pub mod seed;
 pub mod state;

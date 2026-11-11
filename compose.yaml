@@ -13,7 +13,6 @@ services:
     environment:
       # Compose-level defaults; real values come from .env when present.
       APP_URL: ${APP_URL:-http://localhost:8080}
-      DATABASE_URL: ${DATABASE_URL:-sqlite://data/openshares.db}
       TURSO_DB_URL: ${TURSO_DB_URL:-}
       TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN:-}
       MEDIA_CACHE_BACKEND: ${MEDIA_CACHE_BACKEND:-fs}
@@ -37,7 +36,6 @@ services:
         required: false
     environment:
       APP_URL: ${APP_URL:-http://localhost:8080}
-      DATABASE_URL: ${DATABASE_URL:-sqlite://data/openshares.db}
       TURSO_DB_URL: ${TURSO_DB_URL:-}
       TURSO_AUTH_TOKEN: ${TURSO_AUTH_TOKEN:-}
       MEDIA_CACHE_BACKEND: ${MEDIA_CACHE_BACKEND:-fs}

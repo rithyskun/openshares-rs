@@ -1,11 +1,14 @@
 //! Data access layer — port of `src/db/index.ts`.
 //!
 //! The TS version wraps `@libsql/client` (SQLite over HTTP to Turso). Here
-//! we use the `libsql` crate, which supports the same two modes behind one
-//! API: `Builder::new_remote(url, auth_token)` for Turso Cloud and
-//! `Builder::new_local(path)` for a local SQLite file. Repositories take
-//! `&Db` and use the `fetch_*`/`execute` helpers below — they never see
-//! which mode is live.
+//! we use the `libsql` crate's `Builder::new_remote(url, auth_token)` —
+//! remote Turso only, same as the TS app's `createClient`. Repositories
+//! take `&Db` and use the `fetch_*`/`execute` helpers below.
+//!
+//! Local SQLite (`Builder::new_local`) exists ONLY as the unit-test
+//! harness — `Db::connect` is compiled under `cfg(test)` and the
+//! `testing` feature (pulled in by dependent crates' dev-deps), so no
+//! shipped binary can talk to a local db.
 //!
 //! `Db::migrate` tracks applied files in `schema_migrations
 //! (name TEXT PRIMARY KEY, applied_at INTEGER)` — the same table and row
@@ -15,10 +18,11 @@
 pub mod repos;
 
 use std::collections::HashSet;
+#[cfg(any(test, feature = "testing"))]
 use std::path::Path;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use libsql::{Builder, Connection, Database, Value};
 use serde::de::DeserializeOwned;
@@ -43,12 +47,30 @@ const QUERY_TIMEOUT: Duration = Duration::from_secs(10);
 /// query parallelism. Local keeps a single slot.
 const REMOTE_POOL_SIZE: usize = 8;
 
-/// `(generation, conn)` slot — the conn is swappable because a remote
-/// hrana *stream* dies permanently when Turso reaps its HTTP conn:
-/// every later query 404s `stream not found` until `Database::connect()`
-/// mints a new `Connection`. The generation dedupes concurrent reconnects
-/// on the same slot.
-type ConnSlot = Arc<Mutex<(u64, Connection)>>;
+/// A remote conn with no successful round trip in this window is
+/// suspect — Turso's edge and client NATs reap idle conns, and the
+/// keepalive only proves liveness every 20s. Older than this and the
+/// conn is probed before a real query parks on it.
+const STALE_AFTER: Duration = Duration::from_secs(45);
+
+/// Bound on the `SELECT 1` liveness probe — one RTT on a live conn.
+/// Tight on purpose: a wedged conn gets reconnected here instead of a
+/// request eating the full `QUERY_TIMEOUT`.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// `(generation, conn, last-ok)` slot — the conn is swappable because a
+/// remote hrana *stream* dies permanently when Turso reaps its HTTP
+/// conn: every later query 404s `stream not found` until
+/// `Database::connect()` mints a new `Connection`. The generation
+/// dedupes concurrent reconnects on the same slot. `last_ok` stamps
+/// the last proven round trip and drives the staleness probe.
+struct Slot {
+    rev: u64,
+    conn: Connection,
+    last_ok: Instant,
+}
+
+type ConnSlot = Arc<Mutex<Slot>>;
 
 /// Read statements are idempotent — safe to replay on a fresh conn after
 /// a transport error. Writes (`INSERT .. RETURNING` included) are not:
@@ -142,12 +164,14 @@ pub struct Db {
 }
 
 impl Db {
-    /// Connect to a local SQLite file, creating it if needed.
-    /// Accepts `sqlite://<path>`, `sqlite:<path>` (`sqlite::memory:` works)
-    /// or a bare path. Does NOT run migrations — call [`Db::migrate`]
-    /// explicitly so the migration step stays visible (same convention as
-    /// `npm run db:setup` in the TS project, which never migrates at
-    /// runtime).
+    /// TEST HARNESS — connect to a local SQLite file, creating it if
+    /// needed. Accepts `sqlite://<path>`, `sqlite:<path>`
+    /// (`sqlite::memory:` works) or a bare path. Compiled only for test
+    /// builds / the `testing` feature: shipped code is Turso-only like
+    /// the TS app's `createClient({url, authToken})`. Does NOT run
+    /// migrations — call [`Db::migrate`] explicitly (same convention as
+    /// `npm run db:setup`, which never migrates at runtime).
+    #[cfg(any(test, feature = "testing"))]
     pub async fn connect(url: &str) -> Result<Self> {
         let path = local_path(url);
 
@@ -209,19 +233,27 @@ impl Db {
         };
 
         // Turso's edge reaps idle HTTP connections, and a dead pooled conn
-        // parks or fails the next remote query. A cheap ping per slot keeps
-        // every stream warm — and going through `scalar` (`q`) self-heals
-        // dead streams proactively instead of a request paying the
-        // reconnect.
+        // parks or fails the next remote query. A bounded `SELECT 1` per
+        // slot keeps every stream warm — and probing all slots in parallel
+        // heals a mass kill (laptop sleep, NAT drop) in one probe window
+        // instead of N serial `QUERY_TIMEOUT` stalls.
         let ping = db.clone();
-        let width = db.slots.len();
         tokio::spawn(async move {
             loop {
                 tokio::time::sleep(Duration::from_secs(20)).await;
-                // round-robin checkout spreads these across all slots.
-                for _ in 0..width {
-                    let _ = ping.scalar::<i64>("SELECT 1", ()).await;
+                let mut join = tokio::task::JoinSet::new();
+                for slot in ping.slots.iter() {
+                    let slot = slot.clone();
+                    let ping = ping.clone();
+                    join.spawn(async move {
+                        let (rev, conn) = {
+                            let g = slot.lock().unwrap_or_else(|e| e.into_inner());
+                            (g.rev, g.conn.clone())
+                        };
+                        ping.probe(&slot, rev, conn).await;
+                    });
                 }
+                while join.join_next().await.is_some() {}
             }
         });
 
@@ -229,25 +261,22 @@ impl Db {
     }
 
     /// Whether this `Db` talks to remote Turso (hrana) rather than a
-    /// local SQLite file — dev-only bootstrap (seed) gates on it.
+    /// test-harness local SQLite file — the stale-probe and
+    /// `transaction()` conn routing gate on it.
     pub fn is_remote(&self) -> bool {
         self.remote
     }
 
-    /// Pick the backend from config — Turso when `TURSO_DB_URL` is set
-    /// (`TURSO_AUTH_TOKEN` may be absent for unauthenticated local sqld),
-    /// otherwise the local `DATABASE_URL` file.
+    /// Connect to remote Turso from config — `TURSO_DB_URL` is required
+    /// (the TS app had no local fallback either). `TURSO_AUTH_TOKEN` may
+    /// be absent for unauthenticated local sqld.
     pub async fn connect_from(config: &crate::config::Config) -> Result<Self> {
-        match &config.turso_db_url {
-            Some(url) => {
-                tracing::info!(db = "turso", "connecting to remote libsql database");
-                Self::connect_remote(url, config.turso_auth_token.as_deref().unwrap_or("")).await
-            }
-            None => {
-                tracing::info!(db = "local", url = %config.database_url, "connecting to local sqlite");
-                Self::connect(&config.database_url).await
-            }
-        }
+        let url = config
+            .turso_db_url
+            .as_deref()
+            .ok_or_else(|| AppError::Config("TURSO_DB_URL is required".into()))?;
+        tracing::info!(db = "turso", "connecting to remote libsql database");
+        Self::connect_remote(url, config.turso_auth_token.as_deref().unwrap_or("")).await
     }
 
     /// Apply pending migrations from `crates/core/migrations/` — tracked in
@@ -308,7 +337,11 @@ impl Db {
     /* ------------------- query helpers (sqlx verbs) ------------------- */
 
     fn slot(conn: Connection) -> ConnSlot {
-        Arc::new(Mutex::new((0, conn)))
+        Arc::new(Mutex::new(Slot {
+            rev: 0,
+            conn,
+            last_ok: Instant::now(),
+        }))
     }
 
     /// Round-robin slot checkout — returns the slot handle, its current
@@ -319,7 +352,7 @@ impl Db {
         let slot = self.slots[idx].clone();
         let (rev, conn) = {
             let g = slot.lock().unwrap_or_else(|e| e.into_inner());
-            (g.0, g.1.clone())
+            (g.rev, g.conn.clone())
         };
         (slot, rev, conn)
     }
@@ -329,11 +362,42 @@ impl Db {
     /// (`rev` moved on), take their conn instead of dialing a second one.
     fn reconnect(database: &Database, slot: &ConnSlot, rev: u64) -> Result<(u64, Connection)> {
         let mut g = slot.lock().unwrap_or_else(|e| e.into_inner());
-        if g.0 == rev {
-            g.1 = database.connect()?;
-            g.0 += 1;
+        if g.rev == rev {
+            g.conn = database.connect()?;
+            g.rev += 1;
+            g.last_ok = Instant::now();
         }
-        Ok((g.0, g.1.clone()))
+        Ok((g.rev, g.conn.clone()))
+    }
+
+    /// Slot proven by a successful round trip — resets the staleness
+    /// window so live conns never pay a probe.
+    fn touch(slot: &ConnSlot) {
+        slot.lock().unwrap_or_else(|e| e.into_inner()).last_ok = Instant::now();
+    }
+
+    /// True when the slot's last *proven* round trip is older than
+    /// [`STALE_AFTER`] — checkout callers probe before trusting it.
+    fn stale(slot: &ConnSlot) -> bool {
+        slot.lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .last_ok
+            .elapsed()
+            > STALE_AFTER
+    }
+
+    /// Bound `SELECT 1` on `conn`. Success marks the slot fresh; any
+    /// failure — dead stream, wedged TCP, timeout — swaps in a fresh
+    /// conn from `database` (keeping the old one if redial fails, so
+    /// the caller's normal retry ladder still decides).
+    async fn probe(&self, slot: &ConnSlot, rev: u64, conn: Connection) -> (u64, Connection) {
+        match timeout(PROBE_TIMEOUT, conn.execute("SELECT 1", ())).await {
+            Ok(Ok(_)) => {
+                Self::touch(slot);
+                (rev, conn)
+            }
+            _ => Self::reconnect(&self.database, slot, rev).unwrap_or((rev, conn)),
+        }
     }
 
     /// Every remote round trip funnels through here. Failure ladder:
@@ -352,9 +416,15 @@ impl Db {
     async fn q(&self, sql: &str, params: libsql::params::Params) -> Result<libsql::Rows> {
         let read = is_read(sql);
         let (slot, mut rev, mut conn) = self.checkout();
+        if self.remote && Self::stale(&slot) {
+            (rev, conn) = self.probe(&slot, rev, conn).await;
+        }
         for _ in 0..3 {
             match timeout(QUERY_TIMEOUT, conn.query(sql, params.clone())).await {
-                Ok(Ok(rows)) => return Ok(rows),
+                Ok(Ok(rows)) => {
+                    Self::touch(&slot);
+                    return Ok(rows);
+                }
                 Ok(Err(e)) if is_stream_dead(&e) => {
                     tracing::warn!(error = %e, "db: remote stream lost, reconnecting");
                     (rev, conn) = Self::reconnect(&self.database, &slot, rev)?;
@@ -487,9 +557,15 @@ impl Db {
     pub async fn execute(&self, sql: &str, params: impl libsql::params::IntoParams) -> Result<u64> {
         let params = params.into_params()?;
         let (slot, mut rev, mut conn) = self.checkout();
+        if self.remote && Self::stale(&slot) {
+            (rev, conn) = self.probe(&slot, rev, conn).await;
+        }
         for _ in 0..2 {
             match timeout(QUERY_TIMEOUT, conn.execute(sql, params.clone())).await {
-                Ok(Ok(n)) => return Ok(n),
+                Ok(Ok(n)) => {
+                    Self::touch(&slot);
+                    return Ok(n);
+                }
                 Ok(Err(e)) if is_stream_dead(&e) => {
                     tracing::warn!(error = %e, "db: remote stream lost, reconnecting");
                     (rev, conn) = Self::reconnect(&self.database, &slot, rev)?;
@@ -504,9 +580,15 @@ impl Db {
     /// Multi-statement script — migrations and `PRAGMA`.
     pub async fn execute_batch(&self, sql: &str) -> Result<()> {
         let (slot, mut rev, mut conn) = self.checkout();
+        if self.remote && Self::stale(&slot) {
+            (rev, conn) = self.probe(&slot, rev, conn).await;
+        }
         for _ in 0..2 {
             match timeout(QUERY_TIMEOUT, conn.execute_batch(sql)).await {
-                Ok(Ok(_)) => return Ok(()),
+                Ok(Ok(_)) => {
+                    Self::touch(&slot);
+                    return Ok(());
+                }
                 Ok(Err(e)) if is_stream_dead(&e) => {
                     tracing::warn!(error = %e, "db: remote stream lost, reconnecting");
                     (rev, conn) = Self::reconnect(&self.database, &slot, rev)?;
@@ -664,7 +746,8 @@ fn de_err(e: serde::de::value::Error) -> AppError {
     AppError::Database(libsql::Error::ToSqlConversionFailure(e.into()))
 }
 
-/// Strip the `sqlite://`/`sqlite:` scheme from `DATABASE_URL`.
+/// Strip the `sqlite://`/`sqlite:` scheme — test-harness `Db::connect`.
+#[cfg(any(test, feature = "testing"))]
 fn local_path(url: &str) -> &str {
     url.strip_prefix("sqlite://")
         .or_else(|| url.strip_prefix("sqlite:"))

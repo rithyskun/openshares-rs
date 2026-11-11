@@ -1,0 +1,24 @@
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["typescript", "react", "unicorn", "oxc"],
+  "ignorePatterns": [
+    ".next/",
+    "next-env.d.ts",
+    "tsconfig.tsbuildinfo",
+    "out/",
+    "dist/"
+  ],
+  "overrides": [
+    {
+      "files": [
+        "src/components/UserMenu.tsx",
+        "src/components/GridControls.tsx",
+        "src/components/FriendsPanel.tsx"
+      ],
+      "rules": {
+        "react/set-state-in-effect": "allow"
+      }
+    }
+  ]
+}
+

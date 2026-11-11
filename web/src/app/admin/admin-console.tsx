@@ -4,6 +4,7 @@ import { useRouter } from "next/navigation";
 import { apiFetch } from "@/lib/apiFetch";
 import { Eraser, Plus, X } from "lucide-react";
 import { useMemo, useState } from "react";
+import { ADMIN_TABS, type AdminTab } from "./tabs";
 
 export type AdminUser = {
   id: number;
@@ -46,7 +47,6 @@ export type VaultStats = {
   topOwners: { name: string; n: number; bytes: number }[];
 };
 
-type Tab = "users" | "roles" | "permissions" | "access" | "vault" | "storage" | "activity";
 type Drawer =
   | { kind: "user"; id: number }
   | { kind: "role"; id: number }
@@ -67,6 +67,7 @@ async function call(path: string, init?: RequestInit): Promise<string | null> {
 }
 
 export function AdminConsole({
+  tab,
   users,
   roles,
   permGroups,
@@ -76,23 +77,25 @@ export function AdminConsole({
   vault,
   siteName,
 }: {
-  users: AdminUser[];
-  roles: RoleWithPerms[];
-  permGroups: PermGroup[];
-  allowlist: string[];
-  activity: AuditRow[];
-  cache: CacheInfo;
-  vault: VaultStats;
-  siteName: string;
+  /** Active tab — route-driven (`/admin?tab=`); the page fetches only
+   * the props that tab renders, the rest arrive undefined. */
+  tab: AdminTab;
+  users?: AdminUser[];
+  roles?: RoleWithPerms[];
+  permGroups?: PermGroup[];
+  allowlist?: string[];
+  activity?: AuditRow[];
+  cache?: CacheInfo;
+  vault?: VaultStats;
+  siteName?: string;
 }) {
   const router = useRouter();
-  const [tab, setTab] = useState<Tab>("users");
   const [drawer, setDrawer] = useState<Drawer>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const openUser = drawer?.kind === "user" ? users.find((u) => u.id === drawer.id) : undefined;
-  const openRole = drawer?.kind === "role" ? roles.find((r) => r.id === drawer.id) : undefined;
+  const openUser = drawer?.kind === "user" ? users?.find((u) => u.id === drawer.id) : undefined;
+  const openRole = drawer?.kind === "role" ? roles?.find((r) => r.id === drawer.id) : undefined;
 
   async function run(fn: () => Promise<string | null>, after?: () => void) {
     setBusy(true);
@@ -106,12 +109,12 @@ export function AdminConsole({
 
   return (
     <div>
-      {/* Tabs */}
+      {/* Tabs — route-driven so each tab fetches only its own data */}
       <div className="flex gap-1 border-b border-white/5">
-        {(["users", "roles", "permissions", "access", "vault", "storage", "activity"] as const).map((t) => (
+        {ADMIN_TABS.map((t) => (
           <button
             key={t}
-            onClick={() => setTab(t)}
+            onClick={() => router.push(`/admin?tab=${t}`)}
             className={`border-0 bg-transparent px-4 py-2 text-sm capitalize transition ${
               tab === t
                 ? "border-b-2 border-teal-400 text-white"
@@ -129,25 +132,25 @@ export function AdminConsole({
         </p>
       )}
 
-      {tab === "users" && (
+      {tab === "users" && users && (
         <UsersTab
           users={users}
           onOpen={(id) => setDrawer({ kind: "user", id })}
           onNew={() => setDrawer({ kind: "newUser" })}
         />
       )}
-      {tab === "roles" && (
+      {tab === "roles" && roles && (
         <RolesTab
           roles={roles}
           onOpen={(id) => setDrawer({ kind: "role", id })}
           onNew={() => setDrawer({ kind: "newRole" })}
         />
       )}
-      {tab === "permissions" && <PermissionsTab permGroups={permGroups} />}
-      {tab === "access" && (
+      {tab === "permissions" && permGroups && <PermissionsTab permGroups={permGroups} />}
+      {tab === "access" && allowlist && (
         <AccessTab
           allowlist={allowlist}
-          siteName={siteName}
+          siteName={siteName ?? ""}
           busy={busy}
           onSaveSiteName={(name) =>
             run(() => call("/api/admin/settings", { method: "PATCH", body: JSON.stringify({ siteName: name }) }))
@@ -160,8 +163,8 @@ export function AdminConsole({
           }
         />
       )}
-      {tab === "vault" && <VaultTab vault={vault} />}
-      {tab === "storage" && (
+      {tab === "vault" && vault && <VaultTab vault={vault} />}
+      {tab === "storage" && cache && (
         <StorageTab
           cache={cache}
           busy={busy}
@@ -173,7 +176,7 @@ export function AdminConsole({
           }
         />
       )}
-      {tab === "activity" && <ActivityTab activity={activity} />}
+      {tab === "activity" && activity && <ActivityTab activity={activity} />}
 
       {/* Drawer */}
       {drawer && (
@@ -194,7 +197,7 @@ export function AdminConsole({
               <UserDrawer
                 key={openUser.id}
                 user={openUser}
-                roles={roles}
+                roles={roles ?? []}
                 busy={busy}
                 onSaveProfile={(patch) =>
                   run(() =>
@@ -223,7 +226,7 @@ export function AdminConsole({
             )}
             {drawer.kind === "newUser" && (
               <NewUserDrawer
-                roles={roles}
+                roles={roles ?? []}
                 busy={busy}
                 onCreate={(data) =>
                   run(
@@ -236,7 +239,7 @@ export function AdminConsole({
             {(openRole || drawer.kind === "newRole") && (
               <RoleDrawer
                 role={openRole}
-                permGroups={permGroups}
+                permGroups={permGroups ?? []}
                 busy={busy}
                 onSave={(name, permissions) =>
                   run(

@@ -1,0 +1,24 @@
+#!/bin/sh
+# Pre-commit gate — runs the repo's lint checks, scoped to what's staged:
+#   crates/*.rs or Cargo.* touched → cargo fmt --check + clippy -D warnings
+#   web/ touched                  → oxlint + tsc --noEmit
+# Docs/config-only commits skip everything and stay instant.
+# Bypass once with `git commit --no-verify`.
+set -e
+
+# brew's rustup is keg-only — make cargo visible to GUI-driven commits too.
+export PATH="/opt/homebrew/opt/rustup/bin:$PATH"
+
+staged="$(git diff --cached --name-only)"
+
+if echo "$staged" | grep -qE '\.rs$|Cargo\.(toml|lock)$'; then
+  echo "▸ cargo fmt --all -- --check"
+  cargo fmt --all -- --check
+  echo "▸ cargo clippy --workspace --all-targets -- -D warnings"
+  cargo clippy --workspace --all-targets -- -D warnings
+fi
+
+if echo "$staged" | grep -q '^web/'; then
+  echo "▸ web: oxlint + typecheck"
+  (cd web && npm run --silent lint && npm run --silent typecheck)
+fi

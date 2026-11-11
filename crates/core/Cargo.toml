@@ -5,6 +5,15 @@ edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 
+[lints]
+workspace = true
+
+# `testing` exposes the local-SQLite `Db::connect` harness to dependent
+# crates' unit tests via their dev-dependencies — shipped builds (which
+# never enable dev-deps) contain no local-db path at all.
+[features]
+testing = []
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true

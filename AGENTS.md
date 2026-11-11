@@ -62,6 +62,12 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 ```
 
+Tasks touching `web/` additionally run its gates there:
+
+```bash
+cd web && npm run lint && npm run typecheck && npm test
+```
+
 Docker (README) is only a fallback — keep its target volume separate and
 never share `./target` between macOS and Linux runs.
 

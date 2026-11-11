@@ -30,9 +30,6 @@ rustup default stable
 
 cp .env.example .env             # set BOT_TOKEN for the bot binary
 ./dev.sh                         # API :8080 + web :3000 together (Ctrl-C stops both)
-DB=local ./dev.sh                # same, but local SQLite (data/dev.db) instead
-                                 # of remote Turso — ~0 ms queries, seeds
-                                 # dev@localhost/devpassword123 on first boot
 
 # or individually:
 cargo run -p openshares-server   # API on :8080 (migrations auto-apply)
@@ -112,9 +109,9 @@ docker run --rm -v "$PWD:/app" \
 
 - `core::bot` compiles + unit-tests but hasn't been smoke-tested against
   real Telegram payloads — first live `/start` may surface DTO tweaks.
-- DB backend: `TURSO_DB_URL`+`TURSO_AUTH_TOKEN` → remote Turso (the same
-  DB the TS app uses); unset → local SQLite file at `DATABASE_URL`. Migrations
-  are tracked in `schema_migrations`, the same table `setup-db.ts` wrote.
+- DB backend: remote Turso only — `TURSO_DB_URL`+`TURSO_AUTH_TOKEN` are
+  required (the same DB the TS app uses). Migrations are tracked in
+  `schema_migrations`, the same table `setup-db.ts` wrote.
 - Media/audit cache backend: `MEDIA_CACHE_BACKEND=s3` (+ `R2_ACCOUNT_ID`,
   `R2_ACCESS_KEY_ID`, `R2_SECRET_ACCESS_KEY`, `R2_BUCKET`; `R2_ENDPOINT`
   optional override) → Cloudflare R2, the `MEDIA_CACHE` binding
@@ -130,9 +127,25 @@ docker run --rm -v "$PWD:/app" \
 
 - Sub-agent delegation policy (workstreams, write scopes, done-criteria) is
   in `AGENTS.md`.
+- **Commits** — one imperative-mood subject line describing the *feature
+  set* (history style: "Add opt-in authenticated Swagger docs, optimize
+  development builds, and …"), capitalized, no trailing period; an optional
+  body explains *why* (trade-offs, parity notes), never restates the diff.
+  One logical change-set per commit — don't mix unrelated fixes in.
+- **Lint** — Rust: `cargo fmt --all -- --check` +
+  `cargo clippy --workspace --all-targets -- -D warnings` (all warnings are
+  errors). Web: `cd web && npm run lint` (oxlint — correctness rules on
+  TS/React sources; generated files are ignored in `.oxlintrc.json`),
+  `npm run typecheck` (`tsc --noEmit`), `npm test` (vitest).
+- **Pre-commit** — `.husky/pre-commit` (needs `npm install` at the root
+  once) runs those gates scoped to staged files: Rust gates when `*.rs` /
+  `Cargo.*` change, oxlint + typecheck when `web/` changes; docs-only
+  commits skip. Bypass once with `git commit --no-verify`.
 - DB entities (`serde::Deserialize` rows via `Db::query_*`) stay in `core`;
   API DTOs live in `server` routes — never leak rows to HTTP.
-- `tracing` for all logging; `unwrap`/`expect` outside tests are lint-denied.
+- `tracing` for all logging; `unwrap`/`expect` outside tests are denied by
+  workspace clippy lints (`[workspace.lints]` in the root `Cargo.toml` —
+  test builds re-allow via `#![cfg_attr(test, allow(...))]`).
 - CPU-bound crypto goes through `tokio::task::spawn_blocking`.
 - Media responses stream (`Body::from_stream`) — never buffer whole files
   at the HTTP layer (object-store `open` is an in-memory `Cursor`, bounded

@@ -3,6 +3,9 @@
 //! NEVER run alongside an active webhook: Telegram delivers each update
 //! to exactly one consumer, and a registered webhook starves getUpdates.
 
+// Workspace lints deny unwrap/expect in shipped code; tests may unwrap.
+#![cfg_attr(test, allow(clippy::unwrap_used, clippy::expect_used))]
+
 use openshares_core::bot::{self, BotContext};
 use openshares_core::config::Config;
 use openshares_core::db::Db;

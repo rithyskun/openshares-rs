@@ -16,14 +16,9 @@ pub struct Config {
     /// `APP_URL` — public base URL (default `http://localhost:8080`).
     pub app_url: String,
 
-    /// `DATABASE_URL` — local SQLite path (`sqlite://<path>`), the
-    /// fallback when `TURSO_DB_URL` is unset.
-    /// Local dev default: `sqlite://data/openshares.db`
-    pub database_url: String,
-
     /// `TURSO_DB_URL` — remote libSQL endpoint (`libsql://*.turso.io` or
-    /// `https://`). When set the API talks to Turso directly (the TS
-    /// `@libsql/client` equivalent); `TURSO_AUTH_TOKEN` goes with it.
+    /// `https://`). Required: the app is Turso-only like the TS
+    /// `@libsql/client` original; `TURSO_AUTH_TOKEN` goes with it.
     pub turso_db_url: Option<String>,
 
     /// `TURSO_AUTH_TOKEN` — JWT for the remote database. Optional in the
@@ -78,8 +73,6 @@ impl Config {
                 .unwrap_or_else(|| "http://localhost:8080".to_string())
                 .trim_end_matches('/')
                 .to_string(),
-            database_url: env("DATABASE_URL")
-                .unwrap_or_else(|| "sqlite://data/openshares.db".to_string()),
             turso_db_url: env("TURSO_DB_URL"),
             turso_auth_token: env("TURSO_AUTH_TOKEN"),
             media_cache_dir: env("MEDIA_CACHE_DIR").unwrap_or_else(|| "./data/cache".to_string()),

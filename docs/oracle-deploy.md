@@ -110,8 +110,8 @@ ssh oracle@<vm-ip> \
   usually enough activity; an hourly
   `curl -fs localhost:8080/healthz >/dev/null` cron on the VM is cheap
   insurance.
-- **`openshares-data` volume** holds `data/` (fs-cache fallback + local
-  sqlite). With `MEDIA_CACHE_BACKEND=s3` and Turso remote, losing the
-  volume only loses the warm cache — keep a backup policy for it anyway.
+- **`openshares-data` volume** holds `data/` (fs-cache fallback). With
+  `MEDIA_CACHE_BACKEND=s3` and Turso remote, losing the volume only
+  loses the warm cache — keep a backup policy for it anyway.
 - 24 GB RAM leaves plenty for cargo builds + runtime; the `lite`-class
   shapes elsewhere would be tighter.

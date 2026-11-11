@@ -38,8 +38,8 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-# sqlite db + media cache + audit shards live under /app/data — mount a
-# volume here in production (`-v openshares-data:/app/data`).
+# media cache + audit shards live under /app/data — mount a volume here
+# in production (`-v openshares-data:/app/data`).
 RUN mkdir -p /app/data
 
 COPY --from=builder /usr/local/bin/openshares-server /usr/local/bin/openshares-server

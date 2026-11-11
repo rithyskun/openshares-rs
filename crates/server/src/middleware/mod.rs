@@ -185,7 +185,6 @@ mod tests {
             config: Config {
                 bot_token: None,
                 app_url: "http://example.com".to_string(),
-                database_url: String::new(),
                 turso_db_url: None,
                 turso_auth_token: None,
                 media_cache_dir: dir.path().join("cache").display().to_string(),

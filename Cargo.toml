@@ -16,6 +16,15 @@ rust-version = "1.99.1"
 license = "MIT"
 authors = ["Rithy Skun <rithy.skun@outlook.com>"]
 
+# Enforced lint policy (inherited per-crate via `[lints] workspace = true`).
+# unwrap/expect are denied in non-test code — handlers must map failures
+# into the error envelope, never panic on attacker-controlled input. Test
+# builds re-allow them via `#![cfg_attr(test, allow(...))]` at each crate
+# root.
+[workspace.lints.clippy]
+unwrap_used = "deny"
+expect_used = "deny"
+
 [workspace.dependencies]
 # Async runtime + web framework
 tokio = { version = "1", features = ["full"] }
