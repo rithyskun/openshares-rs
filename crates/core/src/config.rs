@@ -59,6 +59,13 @@ pub struct Config {
     /// `WEB_ORIGIN` — Next.js server to proxy non-`/api` page traffic to
     /// (e.g. `http://127.0.0.1:3000`). `None` → no proxy (API-only mode).
     pub web_origin: Option<String>,
+
+    /// `TRUST_PROXY` (`1`/`true`) — a real reverse proxy (cloudflared,
+    /// nginx) fronts the app, so `cf-connecting-ip`/`x-forwarded-for`
+    /// are proxy-set and safe to key rate limits on. Unset, the TCP
+    /// peer address is used — client-supplied forwarding headers are
+    /// spoofable and must not grant private rate-limit buckets.
+    pub trust_proxy: bool,
 }
 
 impl Config {
@@ -87,6 +94,8 @@ impl Config {
                 .unwrap_or(7),
             port: env("PORT").and_then(|v| v.parse().ok()).unwrap_or(8080),
             web_origin: env("WEB_ORIGIN").map(|v| v.trim_end_matches('/').to_string()),
+            trust_proxy: env("TRUST_PROXY")
+                .is_some_and(|v| v == "1" || v.eq_ignore_ascii_case("true")),
         })
     }
 }

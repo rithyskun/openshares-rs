@@ -180,6 +180,7 @@ mod tests {
                 cache_ttl_days: 7,
                 port: 0,
                 web_origin: None,
+                trust_proxy: false,
             },
             tg: None,
             jwt: Some(jwt.clone()),

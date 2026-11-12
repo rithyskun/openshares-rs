@@ -66,6 +66,13 @@ impl FromRequestParts<AppState> for MaybeUser {
 #[derive(Clone)]
 pub struct EarlySession(pub Option<SessionUser>);
 
+/// Extension marker — the client IP the gateway resolved once per
+/// request (trusted-proxy aware; see `rate_limit::resolve_ip`). The
+/// login route's per-IP limiter reads it rather than re-deriving an IP
+/// from spoofable forwarding headers.
+#[derive(Debug, Clone)]
+pub struct ClientIp(pub String);
+
 async fn resolve_user(parts: &Parts, state: &AppState) -> Result<Option<SessionUser>> {
     if let Some(early) = parts.extensions.get::<EarlySession>() {
         return Ok(early.0.clone());

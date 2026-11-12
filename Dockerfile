@@ -39,8 +39,11 @@ RUN apt-get update \
 
 WORKDIR /app
 # media cache + audit shards live under /app/data — mount a volume here
-# in production (`-v openshares-data:/app/data`).
-RUN mkdir -p /app/data
+# in production (`-v openshares-data:/app/data`). Both supervised
+# processes run as the unprivileged `openshares` user.
+RUN useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin openshares \
+    && mkdir -p /app/data \
+    && chown -R openshares:openshares /app/data
 
 COPY --from=builder /usr/local/bin/openshares-server /usr/local/bin/openshares-server
 COPY --from=builder /usr/local/bin/openshares-bot /usr/local/bin/openshares-bot
@@ -60,4 +63,5 @@ ENV WEB_ORIGIN=http://127.0.0.1:3000 \
     API_INTERNAL_URL=http://127.0.0.1:8080
 
 EXPOSE 8080
+USER openshares
 CMD ["openshares-entrypoint"]

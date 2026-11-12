@@ -1,0 +1,19 @@
+# Accepted residual advisories — libsql 0.10's own hyper 0.14 / rustls 0.22
+# remote stack; not independently upgradable (see AGENTS.md "Dependency
+# vulns"). Revisit when libsql revs.
+[advisories]
+ignore = [
+    # h2
+    "RUSTSEC-2026-0258",
+    # rustls
+    "RUSTSEC-2026-0346",
+    "RUSTSEC-2026-0349",
+    # rustls-webpki
+    "RUSTSEC-2026-0104",
+    "RUSTSEC-2026-0098",
+    "RUSTSEC-2026-0099",
+    "RUSTSEC-2026-0049",
+    "RUSTSEC-2026-0382",
+    # rustls-pemfile (unmaintained)
+    "RUSTSEC-2025-0134",
+]

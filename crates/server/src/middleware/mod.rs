@@ -102,6 +102,14 @@ async fn gateway(State(state): State<AppState>, mut req: Request, next: Next) ->
     let path = req.uri().path().to_owned();
     let plan = csrf::plan(&req);
 
+    // Resolve the client IP once — the `ip:` bucket below and the
+    // login route's `login:<ip>` limiter share it. Whether forwarding
+    // headers count is a deployment property (`TRUST_PROXY`), not a
+    // per-request choice.
+    let client_ip = rate_limit::resolve_ip(&req, state.config.trust_proxy);
+    req.extensions_mut()
+        .insert(crate::extract::ClientIp(client_ip));
+
     if path.starts_with(API_PREFIX) {
         // Same-origin-only API: any Origin header must match this host —
         // before the OPTIONS short-circuit, exactly like middleware.ts.
@@ -197,6 +205,7 @@ mod tests {
                 cache_ttl_days: 7,
                 port: 0,
                 web_origin: None,
+                trust_proxy: false,
             },
             tg: None,
             jwt: None,

@@ -23,6 +23,10 @@ services:
       R2_BUCKET: ${R2_BUCKET:-}
       R2_ENDPOINT: ${R2_ENDPOINT:-}
       RUST_LOG: ${RUST_LOG:-info}
+      # Docker NAT hides real client IPs behind the gateway — forwarding
+      # headers are the only per-client signal (tunnel profile sets them).
+      # If you expose :8080 untrusted-directly, set TRUST_PROXY=0.
+      TRUST_PROXY: ${TRUST_PROXY:-1}
     restart: unless-stopped
 
   bot:

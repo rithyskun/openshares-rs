@@ -38,7 +38,8 @@ cargo run -p openshares-bot      # long-poll bot (dev only — no webhook!)
 ```
 
 Checks (same as CI): `cargo fmt --all -- --check` ·
-`cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace`
+`cargo clippy --workspace --all-targets -- -D warnings` · `cargo test --workspace` —
+and in `web/`: `npm run lint` · `npm run typecheck` · `npm test`
 
 **Docker (sandboxed check or Windows without a toolchain):**
 

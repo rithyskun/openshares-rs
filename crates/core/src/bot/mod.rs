@@ -241,6 +241,27 @@ async fn handle_start_code(
         return Ok(());
     }
 
+    // Claim the code atomically — the `used: 0 → 1` transition can only
+    // win once, so two concurrent redemptions can't both pass the checks
+    // above (the previous check-then-update pair was racy).
+    let claimed = ctx
+        .db
+        .execute(
+            "UPDATE link_codes SET used = 1 WHERE code = ? AND used = 0",
+            libsql::params![code],
+        )
+        .await?;
+    if claimed == 0 {
+        reply(
+            ctx,
+            chat_id,
+            "That code isn't valid anymore. Ask for a fresh one on the website.",
+            None,
+        )
+        .await;
+        return Ok(());
+    }
+
     if row.purpose == "friend" {
         let Some(owner_id) = row.user_id else {
             reply(
@@ -257,12 +278,6 @@ async fn handle_start_code(
                 "INSERT OR IGNORE INTO friend_links (owner_user_id, friend_telegram_id, created_at)
                  VALUES (?, ?, ?)",
                 libsql::params![owner_id, from.id.to_string(), now()],
-            )
-            .await?;
-        ctx.db
-            .execute(
-                "UPDATE link_codes SET used = 1 WHERE code = ?",
-                libsql::params![code],
             )
             .await?;
 
@@ -318,12 +333,6 @@ async fn handle_start_code(
             return Ok(());
         };
         link_user_to_telegram(ctx, user_id, from, chat_id).await?;
-        ctx.db
-            .execute(
-                "UPDATE link_codes SET used = 1 WHERE code = ?",
-                libsql::params![code],
-            )
-            .await?;
         return Ok(());
     }
 

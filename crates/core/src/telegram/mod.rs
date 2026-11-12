@@ -190,6 +190,14 @@ impl TgClient {
         )
     }
 
+    /// `reqwest::Error` Display embeds the request URL — and every Bot
+    /// API URL carries the token — so strip it before error strings
+    /// reach logs or route responses (TS `fetch` errors never included
+    /// the URL).
+    fn redact(&self, msg: String) -> String {
+        msg.replace(&self.token, "[redacted]")
+    }
+
     /// One JSON attempt against the Bot API — `fetchOnce` in telegram.ts.
     /// `Err` means a transport-level failure (no usable response), which
     /// is the only case `call` retries.
@@ -204,9 +212,9 @@ impl TgClient {
             .json(payload)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| self.redact(e.to_string()))?;
         let status = res.status().as_u16();
-        let body: ApiEnvelope<T> = res.json().await.map_err(|e| e.to_string())?;
+        let body: ApiEnvelope<T> = res.json().await.map_err(|e| self.redact(e.to_string()))?;
         Ok((status, body))
     }
 
@@ -253,9 +261,9 @@ impl TgClient {
             .multipart(form)
             .send()
             .await
-            .map_err(|e| e.to_string())?;
+            .map_err(|e| self.redact(e.to_string()))?;
         let status = res.status().as_u16();
-        let body: ApiEnvelope<T> = res.json().await.map_err(|e| e.to_string())?;
+        let body: ApiEnvelope<T> = res.json().await.map_err(|e| self.redact(e.to_string()))?;
         Ok((status, body))
     }
 
@@ -454,7 +462,7 @@ impl TgClient {
         if let Some(range) = range {
             req = req.header("range", range);
         }
-        let res = req.send().await.map_err(|e| e.to_string())?;
+        let res = req.send().await.map_err(|e| self.redact(e.to_string()))?;
         if !res.status().is_success() {
             return Err(format!("HTTP {}", res.status()));
         }
@@ -727,6 +735,34 @@ mod tests {
             cache_key("abc", ""),
             "a9993e364706816aba3e25717850c26c9cd0d89d"
         );
+    }
+
+    #[test]
+    fn error_strings_never_carry_the_token() {
+        // reqwest errors embed the request URL — and every Bot API URL
+        // contains the token. redact() must strip it from anything that
+        // could reach a log line or an API error response.
+        let tg = TgClient::new("12345:super-secret-token");
+        for raw in [
+            format!(
+                "error sending request for url ({})",
+                tg.api_url("sendPhoto")
+            ),
+            format!(
+                "error decoding response body: timeout for url ({})",
+                tg.api_url("getFile")
+            ),
+            format!(
+                "HTTP status client error (400) for url ({})",
+                tg.file_url("photos/file_1.jpg")
+            ),
+        ] {
+            let out = tg.redact(raw);
+            assert!(!out.contains("12345:super-secret-token"), "leaked: {out}");
+            assert!(out.contains("[redacted]"), "no marker: {out}");
+        }
+        // untouched when the token isn't present
+        assert_eq!(tg.redact("plain error".to_string()), "plain error");
     }
 
     #[test]

@@ -6,14 +6,19 @@
 //! TS app writes. `rate_limit_info` already fails open on DB errors — no
 //! second layer is added here.
 
+use std::net::SocketAddr;
+
 use axum::Json;
 use axum::extract::Request;
+use axum::extract::connect_info::ConnectInfo;
 use axum::http::{HeaderName, HeaderValue, Method, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde_json::json;
 
 use openshares_core::crypto::security::{Limiter, RateLimitInfo, client_ip};
 use openshares_core::db::now;
+
+use crate::extract::ClientIp;
 
 const LIMIT: HeaderName = HeaderName::from_static("x-ratelimit-limit");
 const REMAINING: HeaderName = HeaderName::from_static("x-ratelimit-remaining");
@@ -37,15 +42,39 @@ pub fn mw_tier(path: &str, method: &Method) -> Limiter {
     }
 }
 
-/// `` `ip:${clientIp(req)}` `` — `cf-connecting-ip` wins, else the first
-/// `x-forwarded-for` hop, else `"unknown"` (all inside [`client_ip`]).
-///
-/// Note: the TS `clientIp` never consults the socket address (`req.ip`), so
-/// no `ConnectInfo<SocketAddr>` plumbing is needed here.
+/// Resolve the client IP for rate-limit keying. With `TRUST_PROXY`
+/// (a real reverse proxy in front — cloudflared, nginx), the forwarding
+/// headers are proxy-set: `cf-connecting-ip` wins, else the first
+/// `x-forwarded-for` hop ([`client_ip`]). Without it those headers are
+/// client-spoofable — an attacker could rotate them for a fresh bucket
+/// per request — so the TCP peer address (`ConnectInfo`, set by
+/// `into_make_service_with_connect_info`) is the only safe source.
+/// `"unknown"` when nothing trustworthy exists.
+pub fn resolve_ip(req: &Request, trust_proxy: bool) -> String {
+    if trust_proxy {
+        let cf = req.headers().get(&CF_CONNECTING_IP).and_then(str_value);
+        let xff = req.headers().get(&X_FORWARDED_FOR).and_then(str_value);
+        let forwarded = client_ip(cf, xff);
+        if !forwarded.is_empty() && forwarded != "unknown" {
+            return forwarded;
+        }
+    }
+    req.extensions()
+        .get::<ConnectInfo<SocketAddr>>()
+        .map(|c| c.0.ip().to_string())
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+/// `` `ip:${clientIp(req)}` `` — reads the [`ClientIp`] extension the
+/// gateway resolved via [`resolve_ip`]; `"unknown"` if absent (unit
+/// tests, or a path the gateway never saw).
 pub fn ip_key(req: &Request) -> String {
-    let cf = req.headers().get(&CF_CONNECTING_IP).and_then(str_value);
-    let xff = req.headers().get(&X_FORWARDED_FOR).and_then(str_value);
-    format!("ip:{}", client_ip(cf, xff))
+    let ip = req
+        .extensions()
+        .get::<ClientIp>()
+        .map(|c| c.0.as_str())
+        .unwrap_or("unknown");
+    format!("ip:{ip}")
 }
 
 /// The 429 early return — middleware.ts lines 109–126: JSON error body,
@@ -137,22 +166,57 @@ mod tests {
         assert_eq!(mw_tier("/api/authent", &Method::GET), Limiter::MwRead);
     }
 
+    fn peer() -> ConnectInfo<SocketAddr> {
+        ConnectInfo(SocketAddr::from(([7, 7, 7, 7], 4321)))
+    }
+
     #[test]
-    fn ip_key_header_order() {
-        // cf-connecting-ip wins over XFF
+    fn resolve_ip_proxy_headers_only_when_trusted() {
+        // trust_proxy → cf-connecting-ip wins over XFF
         let r = req()
             .header(&CF_CONNECTING_IP, "1.2.3.4")
             .header(&X_FORWARDED_FOR, "9.9.9.9, 8.8.8.8")
+            .extension(peer())
             .body(Body::empty())
             .unwrap();
-        assert_eq!(ip_key(&r), "ip:1.2.3.4");
+        assert_eq!(resolve_ip(&r, true), "1.2.3.4");
         // first XFF hop
         let r = req()
             .header(&X_FORWARDED_FOR, "  5.6.7.8 , 9.9.9.9")
+            .extension(peer())
             .body(Body::empty())
             .unwrap();
-        assert_eq!(ip_key(&r), "ip:5.6.7.8");
-        // nothing → "unknown"
+        assert_eq!(resolve_ip(&r, true), "5.6.7.8");
+        // no forwarding headers → socket peer, not "unknown"
+        let r = req().extension(peer()).body(Body::empty()).unwrap();
+        assert_eq!(resolve_ip(&r, true), "7.7.7.7");
+    }
+
+    #[test]
+    fn resolve_ip_without_proxy_ignores_spoofable_headers() {
+        // Attacker-set cf-connecting-ip must NOT earn a private bucket.
+        let r = req()
+            .header(&CF_CONNECTING_IP, "1.2.3.4")
+            .header(&X_FORWARDED_FOR, "5.6.7.8")
+            .extension(peer())
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(resolve_ip(&r, false), "7.7.7.7");
+        // no ConnectInfo (tests, non-TCP transports) → "unknown"
+        let r = req()
+            .header(&CF_CONNECTING_IP, "1.2.3.4")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(resolve_ip(&r, false), "unknown");
+    }
+
+    #[test]
+    fn ip_key_reads_gateway_extension() {
+        let r = req()
+            .extension(ClientIp("9.9.9.9".to_string()))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(ip_key(&r), "ip:9.9.9.9");
         let r = req().body(Body::empty()).unwrap();
         assert_eq!(ip_key(&r), "ip:unknown");
     }

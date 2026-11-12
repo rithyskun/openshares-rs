@@ -30,7 +30,7 @@ use openshares_core::crypto::password::{
     SESSION_TTL_SECS, cleanup_expired_sessions, create_session, destroy_session_by_token,
     verify_password_async,
 };
-use openshares_core::crypto::security::{Limiter, client_ip, rate_limited};
+use openshares_core::crypto::security::{Limiter, rate_limited};
 use openshares_core::crypto::signing::{parse_json_body, signing_key_for};
 use openshares_core::db::repos::users;
 
@@ -98,7 +98,7 @@ pub(crate) async fn login(
 ) -> Result<Response> {
     // Route-level `AUTH_LIMITER` — the middleware's `MW_AUTH` IP tier
     // already ran; this is the route.ts `rateLimited("login:<ip>")`.
-    if rate_limited(&state.db, Limiter::Auth, &login_key(&headers)).await {
+    if rate_limited(&state.db, Limiter::Auth, &login_key(&req)).await {
         return Ok(too_many_requests());
     }
 
@@ -109,8 +109,10 @@ pub(crate) async fn login(
     }
 
     // findUserByEmail + verifyPassword — same 401 for unknown user and
-    // bad password (no verify run at all when the user doesn't exist).
+    // bad password. Unknown users still pay a scrypt verify against
+    // DEAD_HASH so response time doesn't leak account existence.
     let Some(user) = users::get_by_email(&state.db, &email).await? else {
+        let _ = verify_password_async(password, Some(DEAD_HASH.to_string())).await;
         return Err(ApiError::unauthorized("Wrong email or password."));
     };
     if !verify_password_async(password, user.password_hash).await? {
@@ -134,6 +136,12 @@ pub(crate) async fn login(
     let cookie = session_cookie(&token, request_is_https(&headers, &uri));
     Ok(login_response(signing_key_for(&sid), &cookie))
 }
+
+/// `DEAD_HASH` — a real `salt:hash` scrypt row for a password that never
+/// matches, so unknown-email logins run the same ~50 ms verify as real
+/// ones. Without it the missing scrypt call leaks which emails exist
+/// (the TS app had the same oracle; fixed here instead of ported).
+const DEAD_HASH: &str = "a1b2c3d4e5f6071829304a5b6c7d8e9f:2fec8453c5d76c0b78d1ecd206d65f8d13ccaaaa49466aef6ad5c3b13d58d29e068220d811081b751ca71e2a9b3b822428ff7fd3068191b722885465006011a5";
 
 /// `{email, password}` — inside the hybrid envelope when `rsaEnabled()`,
 /// read off the body otherwise. The `ts` freshness check rejects stale
@@ -167,13 +175,15 @@ async fn credentials(body: LoginBody) -> Result<(String, String)> {
 }
 
 /// `"login:" + clientIp(req)` — the route-level limiter bucket key.
-/// `cf-connecting-ip` wins, else the first `x-forwarded-for` hop.
-fn login_key(headers: &HeaderMap) -> String {
-    let cf = headers
-        .get("cf-connecting-ip")
-        .and_then(|v| v.to_str().ok());
-    let xff = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok());
-    format!("login:{}", client_ip(cf, xff))
+/// Reads the [`ClientIp`] the gateway resolved (trusted-proxy aware),
+/// never the raw forwarding headers.
+fn login_key(req: &Request) -> String {
+    let ip = req
+        .extensions()
+        .get::<crate::extract::ClientIp>()
+        .map(|c| c.0.as_str())
+        .unwrap_or("unknown");
+    format!("login:{ip}")
 }
 
 /* ------------------------- POST /auth/logout ------------------------- */
@@ -390,23 +400,26 @@ NwIDAQAB\n\
     }
 
     #[test]
-    fn login_key_header_priority() {
-        let mut headers = HeaderMap::new();
-        headers.insert("cf-connecting-ip", HeaderValue::from_static("1.2.3.4"));
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static("9.9.9.9, 8.8.8.8"),
-        );
-        assert_eq!(login_key(&headers), "login:1.2.3.4");
+    fn login_key_uses_gateway_resolved_ip() {
+        // The gateway resolves the client IP into `ClientIp` — raw
+        // forwarding headers are never re-consulted here.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .extension(crate::extract::ClientIp("1.2.3.4".to_string()))
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(login_key(&req), "login:1.2.3.4");
 
-        let mut headers = HeaderMap::new();
-        headers.insert(
-            "x-forwarded-for",
-            HeaderValue::from_static(" 5.6.7.8 , 9.9.9.9"),
-        );
-        assert_eq!(login_key(&headers), "login:5.6.7.8");
-
-        assert_eq!(login_key(&HeaderMap::new()), "login:unknown");
+        // A spoofed cf-connecting-ip can't influence the bucket when the
+        // gateway didn't install a ClientIp (or resolved something else).
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header("cf-connecting-ip", "9.9.9.9")
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(login_key(&req), "login:unknown");
     }
 
     #[tokio::test]
@@ -453,6 +466,7 @@ NwIDAQAB\n\
                 cache_ttl_days: 7,
                 port: 0,
                 web_origin: None,
+                trust_proxy: false,
             },
             tg: None,
             jwt: Some(Arc::new(
