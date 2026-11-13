@@ -1,6 +1,17 @@
 # Accepted residual advisories — libsql 0.10's own hyper 0.14 / rustls 0.22
 # remote stack; not independently upgradable (see AGENTS.md "Dependency
 # vulns"). Revisit when libsql revs.
+#
+# rsa 0.9 / crypto-bigint 0.5 come from jsonwebtoken 10.4's `rust_crypto`
+# backend, which pins rsa ^0.9.6 (signature 2.x). Our envelope crypto uses
+# rsa 0.10 (signature 3.x) but the two can't share a provider until
+# jsonwebtoken moves to signature 3. Both advisories are unreachable here:
+#   - 2023-0071 (Marvin) is an RSA *decryption* padding oracle — the
+#     provider only signs/verifies RS256, never decrypts.
+#   - 2026-0387 affects EC bigint ops — reachable only via the p256/p384
+#     signers; our factory dispatches RS256 only.
+# aws_lc_rs was rejected: it needs a C toolchain on Windows (same reason
+# reqwest uses native-tls).
 [advisories]
 ignore = [
     # h2
@@ -16,4 +27,7 @@ ignore = [
     "RUSTSEC-2026-0382",
     # rustls-pemfile (unmaintained)
     "RUSTSEC-2025-0134",
+    # jsonwebtoken rust_crypto backend (see header)
+    "RUSTSEC-2023-0071",
+    "RUSTSEC-2026-0387",
 ]

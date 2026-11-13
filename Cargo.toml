@@ -76,6 +76,9 @@ hmac = "0.13"
 aes-gcm = "0.10"
 rsa = { version = "0.10" }
 scrypt = "0.11"
-jsonwebtoken = "9"
+# v10.3+ fixes CVE-2026-25537 (type-confused exp/nbf skipped validation).
+# rust_crypto backend is pure Rust — aws_lc_rs would need a C toolchain
+# on Windows (same reason reqwest uses native-tls).
+jsonwebtoken = { version = "10.4", features = ["rust_crypto"] }
 subtle = "2"
 zeroize = "1"

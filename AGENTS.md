@@ -109,7 +109,11 @@ review, and security pass below is not done.
   remote stack — not independently upgradable; revisit when libsql revs):
   RUSTSEC-2026-0258 (h2), -2026-0346/-0349 (rustls),
   -2026-0104/-0098/-0099/-0049/-0382 (rustls-webpki), -2025-0134
-  (rustls-pemfile, unmaintained).
+  (rustls-pemfile, unmaintained). jsonwebtoken 10's `rust_crypto` backend
+  pins rsa 0.9 (signature 2.x) — RUSTSEC-2023-0071 (Marvin; decryption
+  oracle, provider only signs/verifies RS256) and RUSTSEC-2026-0387
+  (crypto-bigint; EC paths we never dispatch) are likewise accepted —
+  revisit when jsonwebtoken adopts signature 3.
 
 ### Verify yourself
 

@@ -65,6 +65,11 @@ impl SessionJwt {
 
     /// Import a pkcs8 private PEM + spki public PEM.
     pub fn from_pems(private_pem: &str, public_pem: &str) -> Result<Self> {
+        // jsonwebtoken 10 requires an installed CryptoProvider before any
+        // encode/decode. `rust_crypto` is pure Rust (aws_lc_rs needs a C
+        // toolchain on Windows). Install is process-global and at most
+        // once — a repeat call returns Err, harmless to ignore.
+        let _ = jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER.install_default();
         let enc = EncodingKey::from_rsa_pem(private_pem.as_bytes())
             .map_err(|e| AppError::Crypto(format!("bad JWT_PRIVATE_KEY PEM: {e}")))?;
         let dec = DecodingKey::from_rsa_pem(public_pem.as_bytes())
@@ -179,5 +184,32 @@ mod tests {
         let other = SessionJwt::from_pems(&other_priv, &other_pub).unwrap();
         let token2 = other.sign(1, "sid", 3600).unwrap();
         assert!(jwt.verify(&token2).is_none());
+    }
+
+    #[test]
+    fn malformed_time_claims_rejected() {
+        // jsonwebtoken <10.3.0 (CVE-2026-25537) silently skipped exp/nbf
+        // validation when the claims weren't numbers — a signed token with
+        // string `exp`/`nbf` would verify as never-expiring. 10.3+ fails
+        // closed: unparseable time claims reject the token.
+        let (private_pem, public_pem) = crate::crypto::test_rsa_pems();
+        let jwt = SessionJwt::from_pems(&private_pem, &public_pem).unwrap();
+
+        #[derive(Serialize)]
+        struct BadClaims<'a> {
+            sub: &'a str,
+            sid: &'a str,
+            exp: &'a str,
+            nbf: &'a str,
+        }
+        let claims = BadClaims {
+            sub: "1",
+            sid: "sid",
+            exp: "not-a-number",
+            nbf: "also-bad",
+        };
+        let token =
+            jsonwebtoken::encode(&Header::new(Algorithm::RS256), &claims, &jwt.enc).unwrap();
+        assert!(jwt.verify(&token).is_none());
     }
 }
